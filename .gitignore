@@ -1,0 +1,35 @@
+# Python caches and test output
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+data/
+
+# Generated reports, uploaded PDFs, and local research data
+*.xlsx
+*.xls
+*.pdf
+
+# Logs and temporary files
+*.log
+*.tmp
+
+# OS/editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp

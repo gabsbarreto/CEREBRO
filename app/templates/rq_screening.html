@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CEREBRO</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260526-queue-controls" />
+  </head>
+  <body>
+    <div class="neural-backdrop" aria-hidden="true"></div>
+    <main class="shell">
+      <header class="topbar hero-panel">
+        <div class="brand-lockup">
+          <div class="brand-mark" aria-hidden="true">
+            <span></span>
+          </div>
+          <div>
+            <p class="eyebrow">AI-assisted extraction console</p>
+            <h1>CEREBRO</h1>
+            <p class="tagline">Find the data hidden inside scientific papers.</p>
+          </div>
+        </div>
+        <div class="hero-status">
+          <span class="signal-chip">Neural scan ready</span>
+          <span id="jobBadge" class="badge">No job</span>
+        </div>
+      </header>
+
+      <section class="workflow-strip" aria-label="CEREBRO workflow">
+        <div><span>01</span><strong>Upload</strong><small>PDFs or folders</small></div>
+        <div><span>02</span><strong>Route</strong><small>OCR or OpenAI file</small></div>
+        <div><span>03</span><strong>Prompt</strong><small>Extraction instructions</small></div>
+        <div><span>04</span><strong>Queue</strong><small>Monitor results</small></div>
+      </section>
+
+      <section class="panel intake-panel">
+        <form id="jobForm">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Source intake</p>
+              <h2>Upload and configure extraction</h2>
+            </div>
+            <span class="panel-kicker">PDF to structured insight</span>
+          </div>
+          <div class="grid">
+            <div class="file-picker upload-card">
+              <span class="file-picker-label">PDF files</span>
+              <strong>Single batch upload</strong>
+              <div class="file-picker-row">
+                <button id="chooseFilesButton" type="button">Choose files</button>
+                <span id="pdfInputSummary" class="file-picker-summary">No files selected</span>
+              </div>
+              <input id="pdfInput" class="visually-hidden-file" type="file" accept="application/pdf,.pdf" multiple />
+            </div>
+            <div class="file-picker upload-card">
+              <span class="file-picker-label">PDF folder</span>
+              <strong>Folder scan</strong>
+              <div class="file-picker-row">
+                <button id="chooseFolderButton" type="button">Choose folder</button>
+                <span id="folderInputSummary" class="file-picker-summary">No folder selected</span>
+              </div>
+              <input id="folderInput" class="visually-hidden-file" type="file" accept="application/pdf,.pdf" webkitdirectory directory multiple />
+            </div>
+
+            <div class="settings-card span-2">
+              <div class="subsection-title">
+                <span>Extraction route</span>
+              </div>
+              <div class="model-grid">
+                <label class="field model-field">
+                  <span>Model preset</span>
+                  <select id="modelPresetSelect" name="rq_model_preset">
+                    {% for preset in model_presets %}
+                    <option value="{{ preset.id }}" {% if defaults.rq_model_preset == preset.id %}selected{% endif %}>{{ preset.label }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <label id="openaiApiKeyField" class="field hidden">
+                  <span>OpenAI API key</span>
+                  <input name="openai_api_key" type="password" autocomplete="off" placeholder="Paste API key, use OPENAI_API_KEY, or data/api_key.txt" />
+                </label>
+              </div>
+              <div id="openaiInputModeField" class="pipeline-switch hidden">
+                <label class="inline-check pipeline-option">
+                  <input id="openaiInputFileCheckbox" type="checkbox" checked />
+                  <span>
+                    <strong>OpenAI file/source extraction</strong>
+                    <small>Attach the PDF as a source so figures, tables, and page layout can be considered.</small>
+                  </span>
+                </label>
+              </div>
+            </div>
+
+            <div class="settings-card span-2">
+              <div class="subsection-title">
+                <span>OCR settings</span>
+              </div>
+              <div class="model-grid">
+                <label class="field">
+                  <span>OCR DPI</span>
+                  <input name="ocr_dpi" type="number" min="72" max="400" value="{{ defaults.ocr_dpi }}" />
+                </label>
+                <label class="field">
+                  <span>OCR batch size</span>
+                  <input name="ocr_batch_size" type="number" min="1" max="8" value="{{ defaults.ocr_batch_size }}" />
+                </label>
+              </div>
+              <label class="field">
+                <span>DeepSeekOCR2 model path</span>
+                <input name="deepseek_ocr_model_path" type="text" placeholder="Auto-detects DeepSeek-OCR-2-8bit by default, or paste local path" />
+              </label>
+            </div>
+
+            <div class="prompt-editor span-2">
+              <div class="prompt-editor-head">
+                <div>
+                  <p class="eyebrow">Extraction prompt</p>
+                  <h2>System prompt</h2>
+                </div>
+                <div class="actions">
+                  <button id="loadSavedPromptButton" type="button">Load saved prompt</button>
+                  <button id="savePromptButton" type="button">Save prompt</button>
+                </div>
+              </div>
+              <label class="field">
+                <span>Save as filename</span>
+                <input id="promptFilenameInput" type="text" name="rq_prompt_filename" value="Animal_studies_1.txt" placeholder="new_prompt_name.txt" />
+              </label>
+              <textarea id="promptTemplateInput" spellcheck="false"></textarea>
+              <p id="promptStatus" class="prompt-status"></p>
+              <input id="rqSystemPromptInput" type="hidden" name="rq_system_prompt" />
+            </div>
+          </div>
+          <div class="form-footer">
+            <div class="queue-hint">Jobs are processed through the existing CEREBRO queue.</div>
+            <button id="runButton" type="submit">Add to queue</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel progress-cockpit">
+        <div class="section-head compact">
+          <div>
+            <p class="eyebrow">Processing queue</p>
+            <h2>Processing Queue</h2>
+            <p id="batchSummaryLine" class="section-subtitle">No files are currently being tracked.</p>
+          </div>
+          <span class="status-dot" aria-hidden="true"></span>
+        </div>
+        <div id="batchStats" class="batch-stats" aria-label="Batch processing summary"></div>
+        <div class="progress">
+          <div id="progressBar" class="progress-bar"></div>
+        </div>
+        <p id="statusLine">Waiting for upload.</p>
+        <div class="dashboard-utility">
+          <span id="autoRefreshStatus">Auto-refreshing · Waiting for first update</span>
+        </div>
+        <div class="dashboard-control-grid">
+          <div class="control-card queue-control-card">
+            <p class="eyebrow">Queue controls</p>
+            <div class="icon-control-row">
+              <button id="pauseButton" class="icon-button" type="button" aria-label="Pause queue" title="Pause queue">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="7" y="5" width="3.5" height="14" rx="1"></rect>
+                  <rect x="13.5" y="5" width="3.5" height="14" rx="1"></rect>
+                </svg>
+                <span class="visually-hidden">Pause queue</span>
+              </button>
+              <button id="resumeButton" class="icon-button" type="button" aria-label="Resume queue" title="Resume queue using the current UI settings for pending jobs">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M8 5.5v13l10-6.5z"></path>
+                </svg>
+                <span class="visually-hidden">Resume queue</span>
+              </button>
+            </div>
+          </div>
+          <div class="control-card recovery-card">
+            <div>
+              <p class="eyebrow">Recovery</p>
+              <h3>Failed jobs</h3>
+              <p>Retry failed jobs with their original saved settings.</p>
+            </div>
+            <button id="retryFailedButton" type="button">Retry failed jobs</button>
+          </div>
+          <div class="control-card report-card">
+            <div>
+              <p class="eyebrow">Reports</p>
+              <h3>Completed results</h3>
+              <p>Download the latest Excel report from completed jobs.</p>
+            </div>
+            <a id="excelReportLink" class="button" href="/api/reports/excel">Download Excel report</a>
+          </div>
+        </div>
+        <div class="queue-filter-panel" aria-label="Queue filters">
+          <div class="filter-chip-row" role="group" aria-label="Filter jobs by status">
+            <button class="filter-chip active" type="button" data-job-filter="all">All <span data-filter-count="all">0</span></button>
+            <button class="filter-chip" type="button" data-job-filter="running">Running <span data-filter-count="running">0</span></button>
+            <button class="filter-chip" type="button" data-job-filter="queued">Queued <span data-filter-count="queued">0</span></button>
+            <button class="filter-chip" type="button" data-job-filter="completed">Completed <span data-filter-count="completed">0</span></button>
+            <button class="filter-chip" type="button" data-job-filter="failed">Failed <span data-filter-count="failed">0</span></button>
+          </div>
+          <div class="job-search-field">
+            <label class="visually-hidden" for="jobSearchInput">Search by filename</label>
+            <input id="jobSearchInput" type="search" placeholder="Search by filename..." autocomplete="off" />
+            <button id="clearJobSearchButton" class="search-clear-button" type="button" aria-label="Clear filename search" title="Clear search">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M6 6l12 12M18 6L6 18"></path>
+              </svg>
+            </button>
+          </div>
+          <p id="filterSummaryLine" class="filter-summary">Showing all jobs.</p>
+        </div>
+        <div class="queue-safety-card">
+          <div>
+            <p class="eyebrow">Queue safety</p>
+            <h3>Pending jobs</h3>
+            <p id="cleanQueueHint">Pause the queue before removing pending jobs.</p>
+          </div>
+          <button id="cleanQueueButton" class="danger-button" type="button" disabled>Remove pending jobs</button>
+        </div>
+        <div id="activeJobsPanel" class="active-jobs-panel">
+          <div class="queue-panel-head">
+            <div>
+              <p class="eyebrow">Live signal channels</p>
+              <h3>Active jobs</h3>
+            </div>
+            <span id="activeWorkersBadge" class="queue-chip">No active workers</span>
+          </div>
+          <div id="activeJobsList" class="active-job-grid"></div>
+        </div>
+        <div id="queuePanel" class="queue-panel">
+          <div class="queue-panel-head">
+            <div>
+              <p class="eyebrow">File-level view</p>
+              <h3>Files in this run</h3>
+            </div>
+            <span class="queue-chip">Real queue status</span>
+          </div>
+          <div id="queueList" class="queue-list"></div>
+        </div>
+        <details class="technical-log">
+          <summary>Show detailed processing events</summary>
+          <ol id="stageList" class="stages technical-stages">
+            <li data-stage="queued">Queued</li>
+            <li data-stage="upload">Uploading PDF</li>
+            <li data-stage="render">Rendering pages</li>
+            <li data-stage="find_deepseek">Finding DeepSeekOCR2</li>
+            <li data-stage="ocr">Running OCR</li>
+            <li data-stage="merge">Merging OCR text</li>
+            <li data-stage="prompt">Building RQ prompt</li>
+            <li data-stage="rq_model">Loading RQ screening model</li>
+            <li data-stage="rq_screening">Running RQ screening</li>
+            <li data-stage="openai_queued">OpenAI queued</li>
+            <li data-stage="openai_running">OpenAI running</li>
+            <li data-stage="complete">Complete</li>
+          </ol>
+          <div id="technicalEventsList" class="technical-events"></div>
+        </details>
+      </section>
+
+      <section id="resultPanel" class="panel hidden">
+        <div class="result-head">
+          <div>
+            <p class="eyebrow">Extraction output</p>
+            <h2>Result</h2>
+          </div>
+          <div class="actions">
+            <button id="copyButton" type="button">Copy result</button>
+            <a id="downloadLink" class="button" href="#">Download result as .md</a>
+          </div>
+        </div>
+        <dl class="metadata-list">
+          <div><dt>PDF filename</dt><dd id="pdfName"></dd></div>
+          <div><dt>Pages</dt><dd id="pageCount"></dd></div>
+          <div><dt>DeepSeekOCR2</dt><dd id="deepseekPath"></dd></div>
+          <div><dt>Warnings</dt><dd id="warnings"></dd></div>
+        </dl>
+        <textarea id="resultText" spellcheck="false"></textarea>
+        <details>
+          <summary>View merged OCR text</summary>
+          <pre id="mergedText"></pre>
+        </details>
+        <details>
+          <summary>View prompt sent to model</summary>
+          <pre id="promptText"></pre>
+        </details>
+        <details>
+          <summary>View metadata</summary>
+          <pre id="metadataText"></pre>
+        </details>
+      </section>
+    </main>
+    <script id="modelPresetData" type="application/json">{{ model_presets | tojson }}</script>
+    <script src="/static/rq_screening.js?v=20260526-queue-controls"></script>
+  </body>
+</html>
