@@ -14,7 +14,7 @@ ensure_project_root()
 from app.shared.cli import emit_json_event as emit
 from app import config
 from app.models import JobSettings
-from app.services import jobs
+from app.services import jobs, projects
 from app.services.rq_screening_pipeline import run_job
 
 
@@ -31,6 +31,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--poll-seconds", type=float, default=30.0)
     parser.add_argument("--limit", type=int, default=0, help="Maximum PDFs to process; 0 means no limit.")
     parser.add_argument("--stop-on-error", action="store_true", help="Stop after the first failed job.")
+    parser.add_argument(
+        "--project-id",
+        default="",
+        help="Project id to store jobs under. Defaults to the Legacy jobs project.",
+    )
     parser.add_argument("--ocr-dpi", type=int, default=config.DEFAULT_OCR_DPI)
     parser.add_argument("--ocr-batch-size", type=int, default=config.DEFAULT_OCR_BATCH_SIZE)
     parser.add_argument(
@@ -103,15 +108,15 @@ def build_settings(args: argparse.Namespace) -> JobSettings:
     )
 
 
-def run_one(pdf_path: Path, settings: JobSettings) -> dict:
+def run_one(pdf_path: Path, settings: JobSettings, *, project_id: str | None = None) -> dict:
     job_id = jobs.new_job_id()
-    root = jobs.create_job(job_id, pdf_path.name, settings)
+    root = jobs.create_job(job_id, pdf_path.name, settings, project_id=project_id)
     dest = root / "input" / "uploaded.pdf"
     shutil.copy2(pdf_path, dest)
-    jobs.update_metadata(root, uploaded_pdf=str(dest), source_pdf=str(pdf_path))
+    jobs.update_metadata(root, uploaded_pdf=str(dest), source_pdf=str(pdf_path), project_id=project_id)
     emit({"event": "batch_job_started", "job_id": job_id, "source_pdf": str(pdf_path), "job_dir": str(root)})
-    run_job(job_id, settings)
-    status = jobs.read_status(job_id)
+    run_job(job_id, settings, project_id=project_id)
+    status = jobs.read_status(job_id, project_id=project_id)
     emit(
         {
             "event": "batch_job_finished",
@@ -128,6 +133,7 @@ def run_one(pdf_path: Path, settings: JobSettings) -> dict:
 def main() -> int:
     args = parse_args()
     settings = build_settings(args)
+    project_id = args.project_id.strip() or str(projects.get_default_project()["project_id"])
     seen: set[Path] = set()
     processed = 0
 
@@ -139,7 +145,7 @@ def main() -> int:
 
         for pdf_path in candidates:
             seen.add(pdf_path.resolve())
-            status = run_one(pdf_path, settings)
+            status = run_one(pdf_path, settings, project_id=project_id)
             processed += 1
             if status.get("status") != "complete" and args.stop_on_error:
                 return 1

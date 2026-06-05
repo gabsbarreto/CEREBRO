@@ -20,12 +20,20 @@ def new_job_id() -> str:
     return uuid.uuid4().hex
 
 
-def job_dir(job_id: str) -> Path:
-    return config.JOBS_DIR / job_id
+def jobs_dir(project_id: str | None = None) -> Path:
+    if project_id:
+        from app.services.projects import get_project_jobs_dir
+
+        return get_project_jobs_dir(project_id)
+    return config.JOBS_DIR
 
 
-def create_job(job_id: str, filename: str, settings: JobSettings) -> Path:
-    root = job_dir(job_id)
+def job_dir(job_id: str, project_id: str | None = None) -> Path:
+    return jobs_dir(project_id) / job_id
+
+
+def create_job(job_id: str, filename: str, settings: JobSettings, project_id: str | None = None) -> Path:
+    root = job_dir(job_id, project_id)
     for name in ["input", "rendered_pages", "ocr_images", "ocr_text", "outputs"]:
         (root / name).mkdir(parents=True, exist_ok=True)
     metadata = {
@@ -35,8 +43,10 @@ def create_job(job_id: str, filename: str, settings: JobSettings) -> Path:
         "settings": settings.to_metadata_dict(),
         "warnings": [],
     }
+    if project_id:
+        metadata["project_id"] = project_id
     write_json(root / "metadata.json", metadata)
-    write_status(JobStatus(job_id=job_id))
+    write_status(JobStatus(job_id=job_id), project_id=project_id)
     return root
 
 
@@ -46,8 +56,8 @@ def save_upload(src_file, dest: Path) -> None:
         shutil.copyfileobj(src_file, out)
 
 
-def delete_job(job_id: str) -> None:
-    root = job_dir(job_id)
+def delete_job(job_id: str, project_id: str | None = None) -> None:
+    root = job_dir(job_id, project_id)
     if not root.exists():
         return
     shutil.rmtree(root)
@@ -88,16 +98,16 @@ def settings_metadata_updates(
     return payload
 
 
-def find_screened_jobs_by_filename(filename: str) -> list[dict[str, Any]]:
+def find_screened_jobs_by_filename(filename: str, project_id: str | None = None) -> list[dict[str, Any]]:
     if not filename:
         return []
     filename = str(filename)
     basename = Path(filename).name
     matches: list[dict[str, Any]] = []
-    for record in list_jobs(limit=0):
+    for record in list_jobs(limit=0, project_id=project_id):
         status = record.get("status") or {}
         metadata = record.get("metadata") or {}
-        root = job_dir(str(record["job_id"]))
+        root = job_dir(str(record["job_id"]), project_id)
         output = root / "outputs" / "rq_screening_output.md"
         if status.get("status") != "complete" or not output.exists() or output.stat().st_size <= 0:
             continue
@@ -112,8 +122,9 @@ def find_screened_job_by_run_identity(
     prompt_filename: str,
     model: str,
     openai_input_mode: str = "ocr_text",
+    project_id: str | None = None,
 ) -> dict[str, Any] | None:
-    for record in find_screened_jobs_by_filename(filename):
+    for record in find_screened_jobs_by_filename(filename, project_id=project_id):
         metadata = record.get("metadata") or {}
         if (
             str(metadata.get("rq_prompt_filename") or "") == str(prompt_filename or "")
@@ -124,18 +135,22 @@ def find_screened_job_by_run_identity(
     return None
 
 
-def find_reusable_ocr_job_by_filename(filename: str) -> dict[str, Any] | None:
-    for record in find_screened_jobs_by_filename(filename):
-        root = job_dir(str(record["job_id"]))
+def find_reusable_ocr_job_by_filename(filename: str, project_id: str | None = None) -> dict[str, Any] | None:
+    for record in find_screened_jobs_by_filename(filename, project_id=project_id):
+        root = job_dir(str(record["job_id"]), project_id)
         merged = root / "outputs" / "merged_full_text.txt"
         if merged.exists() and len(merged.read_text(encoding="utf-8").strip()) >= 20:
             return record
     return None
 
 
-def find_reusable_openai_file_job(pdf_sha256: str, filename: str = "") -> dict[str, Any] | None:
+def find_reusable_openai_file_job(
+    pdf_sha256: str,
+    filename: str = "",
+    project_id: str | None = None,
+) -> dict[str, Any] | None:
     basename = Path(str(filename or "")).name
-    for record in list_jobs(limit=0):
+    for record in list_jobs(limit=0, project_id=project_id):
         metadata = record.get("metadata") or {}
         file_id = str(metadata.get("openai_file_id") or "")
         if not file_id:
@@ -169,8 +184,12 @@ def job_matches_run_identity(root: Path, settings: JobSettings) -> bool:
     )
 
 
-def create_screening_rerun_child_job(source_job_id: str, settings: JobSettings) -> tuple[str, Path]:
-    source_root = job_dir(source_job_id)
+def create_screening_rerun_child_job(
+    source_job_id: str,
+    settings: JobSettings,
+    project_id: str | None = None,
+) -> tuple[str, Path]:
+    source_root = job_dir(source_job_id, project_id)
     source_metadata = read_metadata(source_root)
     source_pdf = source_root / "input" / "uploaded.pdf"
     if not source_pdf.exists() or source_pdf.stat().st_size == 0:
@@ -178,7 +197,7 @@ def create_screening_rerun_child_job(source_job_id: str, settings: JobSettings) 
 
     filename = str(source_metadata.get("original_filename") or source_pdf.name)
     child_job_id = new_job_id()
-    child_root = create_job(child_job_id, filename, settings)
+    child_root = create_job(child_job_id, filename, settings, project_id=project_id)
     child_pdf = child_root / "input" / "uploaded.pdf"
     shutil.copy2(source_pdf, child_pdf)
     update_metadata(
@@ -189,13 +208,13 @@ def create_screening_rerun_child_job(source_job_id: str, settings: JobSettings) 
         rerun_created_from_job_id=source_job_id,
         rerun_requested_at=datetime.now(timezone.utc).isoformat(),
     )
-    copy_reusable_ocr(source_job_id, child_root)
-    copy_reusable_openai_file(source_job_id, child_root)
+    copy_reusable_ocr(source_job_id, child_root, source_project_id=project_id)
+    copy_reusable_openai_file(source_job_id, child_root, source_project_id=project_id)
     return child_job_id, child_root
 
 
-def copy_reusable_ocr(source_job_id: str, target_root: Path) -> None:
-    source_root = job_dir(source_job_id)
+def copy_reusable_ocr(source_job_id: str, target_root: Path, source_project_id: str | None = None) -> None:
+    source_root = job_dir(source_job_id, source_project_id)
     source_ocr = source_root / "ocr_text"
     target_ocr = target_root / "ocr_text"
     if source_ocr.exists():
@@ -221,8 +240,8 @@ def copy_reusable_ocr(source_job_id: str, target_root: Path) -> None:
     update_metadata(target_root, **updates)
 
 
-def copy_reusable_openai_file(source_job_id: str, target_root: Path) -> None:
-    source_metadata = read_metadata(job_dir(source_job_id))
+def copy_reusable_openai_file(source_job_id: str, target_root: Path, source_project_id: str | None = None) -> None:
+    source_metadata = read_metadata(job_dir(source_job_id, source_project_id))
     file_id = str(source_metadata.get("openai_file_id") or "")
     if not file_id:
         return
@@ -234,16 +253,16 @@ def copy_reusable_openai_file(source_job_id: str, target_root: Path) -> None:
     )
 
 
-def read_status(job_id: str) -> dict[str, Any]:
-    path = job_dir(job_id) / "status.json"
+def read_status(job_id: str, project_id: str | None = None) -> dict[str, Any]:
+    path = job_dir(job_id, project_id) / "status.json"
     if not path.exists():
         raise FileNotFoundError(f"Job not found: {job_id}")
     return read_json(path)
 
 
-def write_status(status: JobStatus | dict[str, Any]) -> None:
+def write_status(status: JobStatus | dict[str, Any], project_id: str | None = None) -> None:
     payload = status.to_dict() if isinstance(status, JobStatus) else status
-    write_json(job_dir(str(payload["job_id"])) / "status.json", payload)
+    write_json(job_dir(str(payload["job_id"]), project_id) / "status.json", payload)
 
 
 def update_status(
@@ -255,8 +274,9 @@ def update_status(
     progress: float,
     error: str | None = None,
     event: dict[str, Any] | None = None,
+    project_id: str | None = None,
 ) -> None:
-    current_path = job_dir(job_id) / "status.json"
+    current_path = job_dir(job_id, project_id) / "status.json"
     with _path_lock(current_path):
         current = read_json(current_path) if current_path.exists() else {"job_id": job_id, "events": []}
         events = list(current.get("events") or [])
@@ -301,9 +321,10 @@ def append_warning(root: Path, warning: str) -> None:
         write_json(path, metadata)
 
 
-def list_jobs(limit: int = 200) -> list[dict[str, Any]]:
+def list_jobs(limit: int = 200, project_id: str | None = None) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    for root in config.JOBS_DIR.iterdir() if config.JOBS_DIR.exists() else []:
+    root_jobs_dir = jobs_dir(project_id)
+    for root in root_jobs_dir.iterdir() if root_jobs_dir.exists() else []:
         if not root.is_dir():
             continue
         status_path = root / "status.json"
@@ -324,6 +345,7 @@ def list_jobs(limit: int = 200) -> list[dict[str, Any]]:
                 "status": status,
                 "metadata": metadata,
                 "job_dir": str(root),
+                "project_id": str(metadata.get("project_id") or project_id or ""),
             }
         )
     records.sort(key=lambda record: str(record.get("created_at") or ""), reverse=True)

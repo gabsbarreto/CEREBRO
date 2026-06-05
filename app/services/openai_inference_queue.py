@@ -28,6 +28,7 @@ class OpenAIInferenceJob:
     user_prompt_file: Path
     output_file: Path
     pdf_path: Path
+    project_id: str | None = None
     openai_input_mode: str = "ocr_text"
     openai_file_id: str = ""
 
@@ -65,8 +66,8 @@ class OpenAIInferenceQueue:
         self._clock = clock
         self._pending: queue.Queue[OpenAIInferenceJob | None] = queue.Queue()
         self._lock = threading.Lock()
-        self._queued: set[str] = set()
-        self._running: set[str] = set()
+        self._queued: set[tuple[str | None, str]] = set()
+        self._running: set[tuple[str | None, str]] = set()
         self._workers = [
             threading.Thread(
                 target=self._worker,
@@ -79,10 +80,11 @@ class OpenAIInferenceQueue:
             worker.start()
 
     def enqueue(self, inference_job: OpenAIInferenceJob) -> bool:
+        key = (inference_job.project_id, inference_job.job_id)
         with self._lock:
-            if inference_job.job_id in self._queued or inference_job.job_id in self._running:
+            if key in self._queued or key in self._running:
                 return False
-            self._queued.add(inference_job.job_id)
+            self._queued.add(key)
         jobs.update_status(
             inference_job.job_id,
             status="running",
@@ -90,21 +92,31 @@ class OpenAIInferenceQueue:
             message="OpenAI inference queued",
             progress=0.72,
             event={"event": "openai_queued", "job_id": inference_job.job_id},
+            project_id=inference_job.project_id,
         )
         self._pending.put(inference_job)
         return True
 
-    def active_job_ids(self) -> set[str]:
-        with self._lock:
-            return set(self._queued) | set(self._running)
-
-    def status(self) -> dict[str, Any]:
+    def active_jobs(self, *, project_id: str | None = None) -> set[tuple[str | None, str]]:
         with self._lock:
             return {
-                "openai_pending_job_ids": list(self._queued),
-                "openai_running_job_ids": list(self._running),
-                "openai_pending_count": len(self._queued),
-                "openai_running_count": len(self._running),
+                key
+                for key in set(self._queued) | set(self._running)
+                if project_id is None or key[0] == project_id
+            }
+
+    def active_job_ids(self, *, project_id: str | None = None) -> set[str]:
+        return {job_id for _project_id, job_id in self.active_jobs(project_id=project_id)}
+
+    def status(self, *, project_id: str | None = None) -> dict[str, Any]:
+        with self._lock:
+            queued = [key for key in self._queued if project_id is None or key[0] == project_id]
+            running = [key for key in self._running if project_id is None or key[0] == project_id]
+            return {
+                "openai_pending_job_ids": [job_id for _project_id, job_id in queued],
+                "openai_running_job_ids": [job_id for _project_id, job_id in running],
+                "openai_pending_count": len(queued),
+                "openai_running_count": len(running),
                 "max_openai_concurrent_requests": self.max_workers,
             }
 
@@ -124,8 +136,9 @@ class OpenAIInferenceQueue:
                 self._pending.task_done()
                 return
             with self._lock:
-                self._queued.discard(inference_job.job_id)
-                self._running.add(inference_job.job_id)
+                key = (inference_job.project_id, inference_job.job_id)
+                self._queued.discard(key)
+                self._running.add(key)
             try:
                 self._run_inference_job(inference_job)
             except Exception as exc:
@@ -138,10 +151,11 @@ class OpenAIInferenceQueue:
                     progress=1.0,
                     error=str(exc),
                     event={"event": "error", "message": str(exc), "provider": "openai"},
+                    project_id=inference_job.project_id,
                 )
             finally:
                 with self._lock:
-                    self._running.discard(inference_job.job_id)
+                    self._running.discard((inference_job.project_id, inference_job.job_id))
                 self._pending.task_done()
 
     def _run_inference_job(self, inference_job: OpenAIInferenceJob) -> None:
@@ -153,6 +167,7 @@ class OpenAIInferenceQueue:
             message="OpenAI inference running",
             progress=0.84,
             event={"event": "openai_running", "job_id": inference_job.job_id},
+            project_id=inference_job.project_id,
         )
 
         def handle_event(event: dict[str, Any]) -> None:
@@ -170,7 +185,7 @@ class OpenAIInferenceQueue:
                 file_id = str(event.get("file_id") or "")
                 if file_id:
                     jobs.update_metadata(
-                        jobs.job_dir(inference_job.job_id),
+                        jobs.job_dir(inference_job.job_id, inference_job.project_id),
                         openai_file_id=file_id,
                         openai_file_uploaded=name == "openai_file_uploaded",
                     )
@@ -186,6 +201,7 @@ class OpenAIInferenceQueue:
                 message=message,
                 progress=progress,
                 event=event,
+                project_id=inference_job.project_id,
             )
 
         for attempt in range(self.max_retries + 1):
@@ -211,6 +227,7 @@ class OpenAIInferenceQueue:
                 self._completion_handler(
                     job_id=inference_job.job_id,
                     settings=inference_job.settings,
+                    project_id=inference_job.project_id,
                     started_at=inference_started_at,
                     prompt_filename=inference_job.prompt_filename,
                     prompt_source_path=inference_job.prompt_source_path,
@@ -237,6 +254,7 @@ class OpenAIInferenceQueue:
                         "delay_seconds": delay,
                         "error": str(exc),
                     },
+                    project_id=inference_job.project_id,
                 )
                 self._sleep(delay)
 

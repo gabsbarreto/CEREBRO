@@ -45,6 +45,16 @@ const rqSystemPromptInput = document.querySelector("#rqSystemPromptInput");
 const savePromptButton = document.querySelector("#savePromptButton");
 const loadSavedPromptButton = document.querySelector("#loadSavedPromptButton");
 const promptStatus = document.querySelector("#promptStatus");
+const currentProjectId = document.body.dataset.currentProjectId || document.querySelector("#currentProjectId")?.value || "";
+const currentProjectName = document.body.dataset.currentProjectName || "";
+const currentProjectType = document.body.dataset.currentProjectType || "pdf";
+const projectSidebar = document.querySelector("#projectSidebar");
+const sidebarToggle = document.querySelector("#sidebarToggle");
+const projectsNavItem = document.querySelector("#projectsNavItem");
+const projectsMenuButton = document.querySelector("#projectsMenuButton");
+const projectsFlyout = document.querySelector("#projectsFlyout");
+const currentProjectNameLabel = document.querySelector("#currentProjectName");
+const initialProjects = JSON.parse(document.querySelector("#projectData")?.textContent || "[]");
 const modelPresets = JSON.parse(document.querySelector("#modelPresetData")?.textContent || "[]");
 const JOB_LIST_LIMIT = 0;
 
@@ -61,6 +71,10 @@ let lastSuccessfulRefreshAt = null;
 let lastUpdatedTimer = null;
 
 document.addEventListener("DOMContentLoaded", () => {
+  initializeProjectSidebar();
+  updateProjectLinks();
+  renderProjectChoices(initialProjects);
+  loadProjectList();
   renderSelectedModelPreset();
   updateUploadSummaries();
   loadPromptTemplate();
@@ -195,7 +209,7 @@ copyButton.addEventListener("click", async () => {
 pauseButton.addEventListener("click", async () => {
   pauseButton.disabled = true;
   try {
-    const response = await fetch("/api/queue/pause", { method: "POST" });
+    const response = await fetch("/api/queue/pause", { method: "POST", body: buildProjectFormData() });
     const payload = await response.json().catch(() => ({}));
     if (response.ok) queueState = payload;
     setStatus("Queue paused. Active worker is being interrupted.", 0, "queued");
@@ -225,7 +239,7 @@ resumeButton.addEventListener("click", async () => {
 retryFailedButton.addEventListener("click", async () => {
   retryFailedButton.disabled = true;
   try {
-    const response = await fetch("/api/queue/retry-failed", { method: "POST" });
+    const response = await fetch("/api/queue/retry-failed", { method: "POST", body: buildProjectFormData() });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       throw new Error(payload.detail || "Could not retry failed jobs.");
@@ -255,7 +269,7 @@ cleanQueueButton.addEventListener("click", async () => {
   }
   cleanQueueButton.disabled = true;
   try {
-    const response = await fetch("/api/queue/clean", { method: "POST" });
+    const response = await fetch("/api/queue/clean", { method: "POST", body: buildProjectFormData() });
     const payload = await response.json().catch(() => ({}));
     setStatus(`Removed ${payload.removed || 0} queued job${payload.removed === 1 ? "" : "s"} from the queue.`, 0, "queued");
     await restoreQueueFromJobList();
@@ -264,6 +278,92 @@ cleanQueueButton.addEventListener("click", async () => {
     updateDashboardControls();
   }
 });
+
+function initializeProjectSidebar() {
+  if (currentProjectNameLabel && currentProjectName) {
+    currentProjectNameLabel.textContent = currentProjectName;
+  }
+  if (sidebarToggle && projectSidebar) {
+    sidebarToggle.addEventListener("click", () => {
+      const isCollapsed = projectSidebar.classList.toggle("collapsed");
+      sidebarToggle.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
+    });
+  }
+  if (projectsMenuButton && projectSidebar) {
+    projectsMenuButton.addEventListener("click", () => {
+      const isOpen = projectSidebar.classList.toggle("projects-open");
+      projectsMenuButton.setAttribute("aria-expanded", isOpen ? "true" : "false");
+    });
+  }
+  if (projectsNavItem && projectSidebar) {
+    projectsNavItem.addEventListener("mouseenter", () => {
+      projectSidebar.classList.add("projects-hover");
+      projectsMenuButton?.setAttribute("aria-expanded", "true");
+    });
+    projectsNavItem.addEventListener("mouseleave", () => {
+      projectSidebar.classList.remove("projects-hover");
+      if (!projectSidebar.classList.contains("projects-open")) {
+        projectsMenuButton?.setAttribute("aria-expanded", "false");
+      }
+    });
+  }
+}
+
+async function loadProjectList() {
+  if (!projectsFlyout) return;
+  try {
+    const response = await fetch("/api/projects");
+    if (!response.ok) return;
+    const payload = await response.json();
+    renderProjectChoices(payload.projects || []);
+  } catch (_error) {
+    return;
+  }
+}
+
+function renderProjectChoices(projects) {
+  if (!projectsFlyout) return;
+  const items = (projects || [])
+    .map((project) => {
+      const projectId = project.project_id || "";
+      const active = projectId === currentProjectId ? "active" : "";
+      const label = project.extraction_type_label || (project.extraction_type === "text" ? "Text extraction" : "PDF extraction");
+      const dashboardPath = project.dashboard_path || (project.extraction_type === "text" ? `/text?project_id=${encodeURIComponent(projectId)}` : `/?project_id=${encodeURIComponent(projectId)}`);
+      return `
+        <button type="button" class="project-choice ${active}" data-project-id="${escapeHtml(projectId)}" data-dashboard-path="${escapeHtml(dashboardPath)}" role="menuitem">
+          <strong>${escapeHtml(project.name || projectId)}</strong>
+          <small>${escapeHtml(label)}</small>
+        </button>
+      `;
+    })
+    .join("");
+  projectsFlyout.innerHTML = items || `<p class="technical-empty">No projects found.</p>`;
+  projectsFlyout.querySelectorAll("[data-project-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const nextProjectId = button.dataset.projectId || "";
+      if (!nextProjectId || nextProjectId === currentProjectId) return;
+      window.location.href = button.dataset.dashboardPath || `/?project_id=${encodeURIComponent(nextProjectId)}`;
+    });
+  });
+}
+
+function updateProjectLinks() {
+  const excelReportLink = document.querySelector("#excelReportLink");
+  if (excelReportLink) {
+    excelReportLink.href = withProject("/api/reports/excel");
+  }
+}
+
+function withProject(url) {
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}project_id=${encodeURIComponent(currentProjectId)}`;
+}
+
+function buildProjectFormData() {
+  const body = new FormData();
+  body.append("project_id", currentProjectId);
+  return body;
+}
 
 function renderSelectedModelPreset() {
   const preset = selectedPreset();
@@ -436,6 +536,7 @@ function buildSettingsFormData() {
 
 function appendSettings(body) {
   syncSystemPromptField();
+  body.append("project_id", currentProjectId);
   const data = new FormData(form);
   for (const field of [
     "ocr_dpi",
@@ -535,7 +636,7 @@ function mergeJobRecords(records) {
 async function restoreQueueFromJobList() {
   try {
     await loadQueueState();
-    const response = await fetch(`/api/jobs?limit=${JOB_LIST_LIMIT}`);
+    const response = await fetch(withProject(`/api/jobs?limit=${JOB_LIST_LIMIT}`));
     if (!response.ok) return;
     const payload = await response.json();
     trackedJobs.clear();
@@ -563,7 +664,7 @@ async function pollAllStatuses() {
   await Promise.all(
     entries.map(async (job) => {
       try {
-        const response = await fetch(`/api/jobs/${job.job_id}/status`);
+        const response = await fetch(withProject(`/api/jobs/${job.job_id}/status`));
         if (!response.ok) return;
         const status = await response.json();
         trackedJobs.set(job.job_id, { ...job, ...status });
@@ -1205,7 +1306,7 @@ async function toggleInlineResult(job) {
 
 async function fetchInlineResult(jobId) {
   try {
-    const response = await fetch(`/api/jobs/${jobId}/result`);
+    const response = await fetch(withProject(`/api/jobs/${jobId}/result`));
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       throw new Error(payload.detail || "Result is not available.");
@@ -1241,7 +1342,7 @@ function renderInlineResult(job) {
       </div>
       <div class="actions">
         <button type="button" data-action="copy-inline">Copy result</button>
-        <a class="button" href="/api/jobs/${encodeURIComponent(job.job_id)}/download">Download .md</a>
+        <a class="button" href="${withProject(`/api/jobs/${encodeURIComponent(job.job_id)}/download`)}">Download .md</a>
       </div>
     </div>
     <dl class="metadata-list compact inline-metadata">
@@ -1342,7 +1443,7 @@ async function deleteJob(job) {
   if (!window.confirm(`Delete ${job.filename || job.job_id} and its whole job folder?`)) {
     return;
   }
-  const response = await fetch(`/api/jobs/${job.job_id}`, { method: "DELETE" });
+  const response = await fetch(withProject(`/api/jobs/${job.job_id}`), { method: "DELETE" });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     setStatus(payload.detail || `Could not delete ${job.filename || job.job_id}.`, 1, "failed");
@@ -1360,7 +1461,7 @@ async function deleteJob(job) {
 
 async function loadQueueState() {
   try {
-    const response = await fetch("/api/queue");
+    const response = await fetch(withProject("/api/queue"));
     if (!response.ok) return;
     queueState = await response.json();
   } catch (_error) {
@@ -1369,7 +1470,7 @@ async function loadQueueState() {
 }
 
 async function loadResult(jobId) {
-  const response = await fetch(`/api/jobs/${jobId}/result`);
+  const response = await fetch(withProject(`/api/jobs/${jobId}/result`));
   const payload = await response.json();
   const metadata = payload.metadata || {};
   resultText.value = payload.output || "";
@@ -1380,7 +1481,7 @@ async function loadResult(jobId) {
   document.querySelector("#pageCount").textContent = metadata.number_of_pages || "";
   document.querySelector("#deepseekPath").textContent = metadata.detected_deepseek_ocr_model_path || "";
   document.querySelector("#warnings").textContent = (metadata.warnings || []).join("; ") || "None";
-  downloadLink.href = `/api/jobs/${jobId}/download`;
+  downloadLink.href = withProject(`/api/jobs/${jobId}/download`);
   resultPanel.classList.remove("hidden");
 }
 

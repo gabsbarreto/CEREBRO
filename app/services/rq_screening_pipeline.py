@@ -20,8 +20,14 @@ from app.services.rq_prompt import build_prompt_transcript, read_prompt_file
 logger = logging.getLogger(__name__)
 
 
-def run_job(job_id: str, settings: JobSettings, *, defer_openai: bool = False) -> None:
-    root = jobs.job_dir(job_id)
+def run_job(
+    job_id: str,
+    settings: JobSettings,
+    *,
+    project_id: str | None = None,
+    defer_openai: bool = False,
+) -> None:
+    root = jobs.job_dir(job_id, project_id)
     pdf_path = root / "input" / "uploaded.pdf"
     started = time.time()
     try:
@@ -35,6 +41,7 @@ def run_job(job_id: str, settings: JobSettings, *, defer_openai: bool = False) -
             message="Uploading PDF",
             progress=0.02,
             event={"event": "stage", "stage": "upload"},
+            project_id=project_id,
         )
         if not pdf_path.exists() or pdf_path.stat().st_size == 0:
             raise RuntimeError("Uploaded PDF was not saved correctly.")
@@ -53,6 +60,7 @@ def run_job(job_id: str, settings: JobSettings, *, defer_openai: bool = False) -
                 message="Using PDF file directly with OpenAI",
                 progress=0.60,
                 event={"event": "openai_pdf_file_mode"},
+                project_id=project_id,
             )
             try:
                 total_pages = page_count(pdf_path)
@@ -69,6 +77,7 @@ def run_job(job_id: str, settings: JobSettings, *, defer_openai: bool = False) -
                 message="Reusing existing OCR text",
                 progress=0.60,
                 event={"event": "reuse_ocr_text"},
+                project_id=project_id,
             )
             merged_text = merged_file.read_text(encoding="utf-8")
             total_pages = int(metadata.get("number_of_pages") or 0)
@@ -82,6 +91,7 @@ def run_job(job_id: str, settings: JobSettings, *, defer_openai: bool = False) -
                 message="Rendering pages",
                 progress=0.08,
                 event={"event": "stage", "stage": "render"},
+                project_id=project_id,
             )
             total_pages = page_count(pdf_path)
             if total_pages <= 0:
@@ -103,6 +113,7 @@ def run_job(job_id: str, settings: JobSettings, *, defer_openai: bool = False) -
                 message="Finding DeepSeekOCR2",
                 progress=0.18,
                 event={"event": "stage", "stage": "find_deepseek"},
+                project_id=project_id,
             )
             model_path = settings.deepseek_ocr_model_path or discover_deepseek_model()
             if not model_path:
@@ -119,6 +130,7 @@ def run_job(job_id: str, settings: JobSettings, *, defer_openai: bool = False) -
                 message=f"Running OCR on {total_pages} pages",
                 progress=0.22,
                 event={"event": "stage", "stage": "ocr"},
+                project_id=project_id,
             )
 
             def handle_ocr_event(event: dict[str, Any]) -> None:
@@ -136,7 +148,7 @@ def run_job(job_id: str, settings: JobSettings, *, defer_openai: bool = False) -
                 else:
                     progress = 0.22
                     message = "Running OCR"
-                jobs.update_status(job_id, stage="ocr", message=message, progress=progress, event=event)
+                jobs.update_status(job_id, stage="ocr", message=message, progress=progress, event=event, project_id=project_id)
 
             run_deepseek_ocr(
                 job_id=job_id,
@@ -158,6 +170,7 @@ def run_job(job_id: str, settings: JobSettings, *, defer_openai: bool = False) -
                 message="Merging OCR text",
                 progress=0.60,
                 event={"event": "stage", "stage": "merge"},
+                project_id=project_id,
             )
             merged_text = merge_page_texts(root / "ocr_text", merged_file)
             if not merged_text.strip() or len(merged_text.strip()) < 20:
@@ -171,6 +184,7 @@ def run_job(job_id: str, settings: JobSettings, *, defer_openai: bool = False) -
             message="Building RQ prompts",
             progress=0.66,
             event={"event": "stage", "stage": "prompt"},
+            project_id=project_id,
         )
         if settings.rq_system_prompt.strip():
             system_prompt = settings.rq_system_prompt.strip()
@@ -215,6 +229,7 @@ def run_job(job_id: str, settings: JobSettings, *, defer_openai: bool = False) -
                         job_id=job_id,
                         settings=settings,
                         started_at=started,
+                        project_id=project_id,
                         prompt_filename=prompt_filename,
                         prompt_source_path=prompt_source_path,
                         system_prompt_file=system_prompt_file,
@@ -242,7 +257,7 @@ def run_job(job_id: str, settings: JobSettings, *, defer_openai: bool = False) -
                 if use_openai_pdf_file
                 else "",
                 input_file_path=pdf_path if use_openai_pdf_file else None,
-                on_event=lambda event: handle_llm_event(job_id, event, provider="openai"),
+                on_event=lambda event: handle_llm_event(job_id, event, provider="openai", project_id=project_id),
             )
         else:
             jobs.update_status(
@@ -251,6 +266,7 @@ def run_job(job_id: str, settings: JobSettings, *, defer_openai: bool = False) -
                 message="Loading RQ screening model",
                 progress=0.72,
                 event={"event": "stage", "stage": "rq_model"},
+                project_id=project_id,
             )
             run_rq_llm(
                 job_id=job_id,
@@ -268,13 +284,14 @@ def run_job(job_id: str, settings: JobSettings, *, defer_openai: bool = False) -
                 repetition_penalty=settings.rq_repetition_penalty,
                 enable_thinking=settings.rq_enable_thinking,
                 verbose=settings.rq_local_inference_verbose,
-                on_event=lambda event: handle_llm_event(job_id, event, provider="local"),
+                on_event=lambda event: handle_llm_event(job_id, event, provider="local", project_id=project_id),
             )
         process_control.raise_if_cancelled(job_id)
 
         complete_screening_job(
             job_id=job_id,
             settings=settings,
+            project_id=project_id,
             started_at=started,
             prompt_filename=prompt_filename,
             prompt_source_path=prompt_source_path,
@@ -292,6 +309,7 @@ def run_job(job_id: str, settings: JobSettings, *, defer_openai: bool = False) -
             progress=0.0,
             error=None,
             event={"event": "paused", "message": str(exc)},
+            project_id=project_id,
         )
         raise
     except Exception as exc:
@@ -304,10 +322,17 @@ def run_job(job_id: str, settings: JobSettings, *, defer_openai: bool = False) -
             progress=1.0,
             error=str(exc),
             event={"event": "error", "message": str(exc)},
+            project_id=project_id,
         )
 
 
-def handle_llm_event(job_id: str, event: dict[str, Any], *, provider: str) -> None:
+def handle_llm_event(
+    job_id: str,
+    event: dict[str, Any],
+    *,
+    provider: str,
+    project_id: str | None = None,
+) -> None:
     name = str(event.get("event", "rq"))
     if name == "rq_model_loading":
         message = "Loading RQ screening model" if provider == "local" else "Starting OpenAI inference"
@@ -325,7 +350,7 @@ def handle_llm_event(job_id: str, event: dict[str, Any], *, provider: str) -> No
         file_id = str(event.get("file_id") or "")
         if file_id:
             jobs.update_metadata(
-                jobs.job_dir(job_id),
+                jobs.job_dir(job_id, project_id),
                 openai_file_id=file_id,
                 openai_file_uploaded=name == "openai_file_uploaded",
             )
@@ -349,4 +374,5 @@ def handle_llm_event(job_id: str, event: dict[str, Any], *, provider: str) -> No
         message=message,
         progress=progress,
         event=event,
+        project_id=project_id,
     )

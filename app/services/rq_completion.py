@@ -15,6 +15,7 @@ def complete_screening_job(
     *,
     job_id: str,
     settings: JobSettings,
+    project_id: str | None = None,
     started_at: float,
     prompt_filename: str,
     prompt_source_path: str,
@@ -25,7 +26,7 @@ def complete_screening_job(
 ) -> None:
     completed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     duration_seconds = round(time.time() - started_at, 2)
-    root = jobs.job_dir(job_id)
+    root = jobs.job_dir(job_id, project_id)
     metadata = jobs.read_metadata(root)
     original_filename = str(metadata.get("original_filename") or pdf_path.name)
     llm_output = output_file.read_text(encoding="utf-8")
@@ -38,6 +39,7 @@ def complete_screening_job(
             llm_model=settings.rq_screening_model,
             llm_output=llm_output,
             prompt=prompt_filename,
+            project_id=project_id,
         )
     except Exception as exc:
         logger.exception("Failed to append Excel summary for job %s", job_id)
@@ -69,4 +71,5 @@ def complete_screening_job(
         message="Screening complete",
         progress=1.0,
         event={"event": "complete"},
+        project_id=project_id,
     )

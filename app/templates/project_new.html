@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>New Project | CEREBRO</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260604-text" />
+  </head>
+  <body>
+    <div class="neural-backdrop" aria-hidden="true"></div>
+    <main class="shell project-create-shell">
+      <section class="panel project-create-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Project setup</p>
+            <h1>New project</h1>
+            <p class="tagline">Create a separate workspace for a review, extraction run, or paper set.</p>
+          </div>
+          <a class="button" href="/">Back to CEREBRO</a>
+        </div>
+        <form class="project-create-form" method="post" action="/projects/new">
+          <label class="field">
+            <span>Project name</span>
+            <input name="project_name" type="text" autocomplete="off" required maxlength="120" />
+          </label>
+          <label class="field">
+            <span>Brief description</span>
+            <textarea name="description" rows="5" maxlength="1000"></textarea>
+          </label>
+          <fieldset class="project-type-picker">
+            <legend>Project type</legend>
+            <label>
+              <input type="radio" name="extraction_type" value="pdf" checked />
+              <span>
+                <strong>PDF extraction</strong>
+                <small>Upload papers or folders and extract from article PDFs.</small>
+              </span>
+            </label>
+            <label>
+              <input type="radio" name="extraction_type" value="text" />
+              <span>
+                <strong>Text extraction</strong>
+                <small>Upload CSV or XLSX rows and extract from selected text columns.</small>
+              </span>
+            </label>
+          </fieldset>
+          <div class="form-footer">
+            <div class="queue-hint">Jobs created after this will be stored inside the new project.</div>
+            <button type="submit">Create project</button>
+          </div>
+        </form>
+      </section>
+    </main>
+  </body>
+</html>

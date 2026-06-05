@@ -40,9 +40,10 @@ def append_summary_row(
     llm_model: str,
     llm_output: str,
     prompt: str = "",
+    project_id: str | None = None,
     workbook_path: Path | None = None,
 ) -> Path:
-    path = workbook_path or config.SUMMARY_XLSX_PATH
+    path = workbook_path or summary_workbook_path(project_id)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     with _SUMMARY_LOCK:
@@ -66,17 +67,21 @@ def append_summary_row(
     return path
 
 
-def rebuild_summary_from_jobs(workbook_path: Path | None = None) -> Path:
-    path = workbook_path or config.SUMMARY_XLSX_PATH
+def rebuild_summary_from_jobs(
+    workbook_path: Path | None = None,
+    *,
+    project_id: str | None = None,
+) -> Path:
+    path = workbook_path or summary_workbook_path(project_id)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     rows: list[list[Any]] = []
-    for record in reversed(jobs.list_jobs(limit=0)):
+    for record in reversed(jobs.list_jobs(limit=0, project_id=project_id)):
         status = record.get("status") or {}
         metadata = record.get("metadata") or {}
         if status.get("status") != "complete":
             continue
-        root = jobs.job_dir(str(record["job_id"]))
+        root = jobs.job_dir(str(record["job_id"]), project_id)
         output_file = root / "outputs" / "rq_screening_output.md"
         if not output_file.exists():
             continue
@@ -110,6 +115,14 @@ def summary_filename(filename: str) -> str:
     if not name:
         return ""
     return Path(name).name.rsplit(".", maxsplit=1)[0]
+
+
+def summary_workbook_path(project_id: str | None = None) -> Path:
+    if project_id:
+        from app.services.projects import project_summary_path
+
+        return project_summary_path(project_id)
+    return config.SUMMARY_XLSX_PATH
 
 
 def apply_summary_layout(worksheet: Worksheet) -> None:

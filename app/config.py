@@ -6,6 +6,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
 JOBS_DIR = DATA_DIR / "jobs"
+PROJECTS_DIR = DATA_DIR / "projects"
 SUMMARY_XLSX_PATH = Path(os.getenv("RQ_SCREENING_SUMMARY_XLSX", str(DATA_DIR / "rq_screening_summary.xlsx")))
 PROMPTS_DIR = Path(os.getenv("RQ_SCREENING_PROMPTS_DIR", str(DATA_DIR / "prompts")))
 DEFAULT_RQ_PROMPT_FILENAME = os.getenv("DEFAULT_RQ_PROMPT_FILENAME", "Animal_studies_1.txt")
@@ -67,5 +68,5 @@ MAX_OCR_WORKERS = max(1, int(os.getenv("MAX_OCR_WORKERS", os.getenv("RQ_MAX_OCR_
 OPENAI_INFERENCE_MAX_RETRIES = max(0, int(os.getenv("OPENAI_INFERENCE_MAX_RETRIES", "3")))
 OPENAI_INFERENCE_RETRY_BASE_SECONDS = max(0.1, float(os.getenv("OPENAI_INFERENCE_RETRY_BASE_SECONDS", "2.0")))
 
-for directory in [DATA_DIR, JOBS_DIR, PROMPTS_DIR]:
+for directory in [DATA_DIR, JOBS_DIR, PROJECTS_DIR, PROMPTS_DIR]:
     directory.mkdir(parents=True, exist_ok=True)

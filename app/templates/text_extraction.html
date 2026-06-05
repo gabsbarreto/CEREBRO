@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Text Extraction | CEREBRO</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260604-text" />
+  </head>
+  <body data-current-project-id="{{ current_project.project_id }}" data-current-project-name="{{ current_project.name }}" data-current-project-type="{{ current_project.extraction_type }}">
+    <div class="neural-backdrop" aria-hidden="true"></div>
+    <aside id="projectSidebar" class="project-sidebar collapsed" aria-label="Project navigation">
+      <button id="sidebarToggle" class="sidebar-toggle" type="button" aria-label="Toggle project sidebar" aria-expanded="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 7h16M4 12h16M4 17h16"></path>
+        </svg>
+      </button>
+      <div class="sidebar-content">
+        <a class="sidebar-brand" href="/?project_id={{ current_project.project_id }}">
+          <span class="sidebar-mark" aria-hidden="true"></span>
+          <span>CEREBRO</span>
+        </a>
+        <nav class="sidebar-nav" aria-label="Projects">
+          <div id="projectsNavItem" class="sidebar-nav-item">
+            <button id="projectsMenuButton" type="button" aria-expanded="false">
+              <span>Projects</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M9 6l6 6-6 6"></path>
+              </svg>
+            </button>
+            <div id="projectsFlyout" class="projects-flyout" role="menu">
+              {% for project in projects %}
+              <button
+                type="button"
+                class="project-choice {% if project.project_id == current_project.project_id %}active{% endif %}"
+                data-project-id="{{ project.project_id }}"
+                data-extraction-type="{{ project.extraction_type }}"
+                data-dashboard-path="{{ project.dashboard_path }}"
+                role="menuitem"
+              >
+                <strong>{{ project.name }}</strong>
+                <small>{{ project.extraction_type_label }}</small>
+              </button>
+              {% endfor %}
+            </div>
+          </div>
+          <a class="sidebar-link" href="/projects/new">New project</a>
+        </nav>
+      </div>
+    </aside>
+
+    <main class="shell text-extraction-shell">
+      <header class="topbar hero-panel">
+        <div class="brand-lockup">
+          <div class="brand-mark" aria-hidden="true">
+            <span></span>
+          </div>
+          <div>
+            <p class="eyebrow">Spreadsheet/text extraction console</p>
+            <h1>CEREBRO</h1>
+            <p class="tagline">Extract structured outputs from spreadsheet rows.</p>
+          </div>
+        </div>
+        <div class="hero-status">
+          <div class="project-context">
+            <span>Current project</span>
+            <strong id="currentProjectName">{{ current_project.name }}</strong>
+          </div>
+          <span class="signal-chip">Text extraction</span>
+          <span id="textQueueBadge" class="badge">No rows</span>
+        </div>
+      </header>
+
+      <section class="workflow-strip text-workflow-strip" aria-label="CEREBRO text extraction workflow">
+        <div><span>01</span><strong>Upload</strong><small>CSV or XLSX</small></div>
+        <div><span>02</span><strong>Map</strong><small>Columns to labels</small></div>
+        <div><span>03</span><strong>Prompt</strong><small>System instructions</small></div>
+        <div><span>04</span><strong>Queue</strong><small>Row-level results</small></div>
+      </section>
+
+      <section class="panel intake-panel text-intake-panel">
+        <form id="textJobForm">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Source intake</p>
+              <h2>Upload and configure row extraction</h2>
+            </div>
+            <span class="panel-kicker">Spreadsheet rows to structured insight</span>
+          </div>
+
+          <div class="grid">
+            <div class="file-picker upload-card span-2">
+              <span class="file-picker-label">Spreadsheet file</span>
+              <strong>CSV or Excel upload</strong>
+              <div class="file-picker-row">
+                <button id="chooseSpreadsheetButton" type="button">Choose file</button>
+                <span id="spreadsheetInputSummary" class="file-picker-summary">No file selected</span>
+              </div>
+              <input id="spreadsheetInput" class="visually-hidden-file" type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+            </div>
+
+            <div class="settings-card span-2">
+              <div class="subsection-title">
+                <span>Extraction route</span>
+              </div>
+              <div class="model-grid">
+                <label class="field model-field">
+                  <span>Model preset</span>
+                  <select id="modelPresetSelect" name="rq_model_preset">
+                    {% for preset in model_presets %}
+                    <option value="{{ preset.id }}" {% if defaults.rq_model_preset == preset.id %}selected{% endif %}>{{ preset.label }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <label id="openaiApiKeyField" class="field hidden">
+                  <span>OpenAI API key</span>
+                  <input name="openai_api_key" type="password" autocomplete="off" placeholder="Paste API key, use OPENAI_API_KEY, or data/api_key.txt" />
+                </label>
+              </div>
+            </div>
+
+            <div class="settings-card span-2 column-mapping-card">
+              <div class="subsection-title">
+                <span>Column mapping</span>
+              </div>
+              <label class="field">
+                <span>Study ID column</span>
+                <input id="studyIdColumnInput" type="text" placeholder="study_id, doi, title..." />
+              </label>
+              <div id="columnMappings" class="column-mappings" aria-label="Column mappings"></div>
+              <button id="addMappingButton" class="add-field-button" type="button">+ Add column mapping</button>
+            </div>
+
+            <div class="prompt-editor span-2">
+              <div class="prompt-editor-head">
+                <div>
+                  <p class="eyebrow">Extraction prompt</p>
+                  <h2>System prompt</h2>
+                </div>
+                <div class="actions">
+                  <button id="loadSavedPromptButton" type="button">Load saved prompt</button>
+                  <button id="savePromptButton" type="button">Save prompt</button>
+                </div>
+              </div>
+              <label class="field">
+                <span>Save as filename</span>
+                <input id="promptFilenameInput" type="text" name="rq_prompt_filename" value="Animal_studies_1.txt" placeholder="new_prompt_name.txt" />
+              </label>
+              <textarea id="promptTemplateInput" spellcheck="false"></textarea>
+              <p id="promptStatus" class="prompt-status"></p>
+              <input id="rqSystemPromptInput" type="hidden" name="rq_system_prompt" />
+            </div>
+          </div>
+
+          <div class="form-footer">
+            <div id="textFormHint" class="queue-hint">Each spreadsheet row will become one queued extraction job.</div>
+            <button id="createTextJobsButton" type="submit">Create row jobs</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel text-results-panel">
+        <div class="section-head compact">
+          <div>
+            <p class="eyebrow">Row queue</p>
+            <h2>Text extraction jobs</h2>
+            <p id="textStatusLine" class="section-subtitle">No rows are currently being tracked.</p>
+          </div>
+          <span class="status-dot" aria-hidden="true"></span>
+        </div>
+
+        <div id="textCounts" class="batch-stats" aria-label="Text extraction summary"></div>
+
+        <div class="dashboard-control-grid">
+          <div class="control-card queue-control-card">
+            <p class="eyebrow">Queue controls</p>
+            <div class="icon-control-row">
+              <button id="pauseTextQueueButton" class="icon-button" type="button" aria-label="Pause text queue" title="Pause after active rows finish">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="7" y="5" width="3.5" height="14" rx="1"></rect>
+                  <rect x="13.5" y="5" width="3.5" height="14" rx="1"></rect>
+                </svg>
+                <span class="visually-hidden">Pause text queue</span>
+              </button>
+              <button id="resumeTextQueueButton" class="icon-button" type="button" aria-label="Resume text queue" title="Resume text queue">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M8 5.5v13l10-6.5z"></path>
+                </svg>
+                <span class="visually-hidden">Resume text queue</span>
+              </button>
+            </div>
+          </div>
+          <div class="control-card recovery-card">
+            <div>
+              <p class="eyebrow">Recovery</p>
+              <h3>Failed rows</h3>
+              <p>Retry failed rows with their original saved prompt and model settings.</p>
+            </div>
+            <button id="retryFailedRowsButton" type="button">Retry failed rows</button>
+          </div>
+          <div class="control-card report-card">
+            <div>
+              <p class="eyebrow">Reports</p>
+              <h3>Spreadsheet export</h3>
+              <p>Download original rows with CEREBRO result columns appended.</p>
+            </div>
+            <a id="textExportLink" class="button" href="/api/text/export">Export spreadsheet</a>
+          </div>
+        </div>
+
+        <div class="queue-filter-panel text-filter-panel" aria-label="Text extraction filters">
+          <div class="filter-chip-row" role="group" aria-label="Filter rows by status">
+            <button class="filter-chip active" type="button" data-text-status-filter="all">All <span data-text-count="all">0</span></button>
+            <button class="filter-chip" type="button" data-text-status-filter="queued">Queued <span data-text-count="queued">0</span></button>
+            <button class="filter-chip" type="button" data-text-status-filter="running">Running <span data-text-count="running">0</span></button>
+            <button class="filter-chip" type="button" data-text-status-filter="completed">Completed <span data-text-count="completed">0</span></button>
+            <button class="filter-chip" type="button" data-text-status-filter="failed">Failed <span data-text-count="failed">0</span></button>
+          </div>
+          <div class="job-search-field">
+            <label class="visually-hidden" for="textSearchInput">Search by Study ID or Record ID</label>
+            <input id="textSearchInput" type="search" placeholder="Search Study ID / Record ID..." autocomplete="off" />
+            <button id="clearTextSearchButton" class="search-clear-button" type="button" aria-label="Clear search" title="Clear search">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M6 6l12 12M18 6L6 18"></path>
+              </svg>
+            </button>
+          </div>
+          <p id="textFilterSummaryLine" class="filter-summary">Showing all rows.</p>
+        </div>
+
+        <div class="text-table-shell">
+          <div class="text-table-header text-table-grid" aria-hidden="true">
+            <span>Row</span>
+            <span>Status</span>
+            <span>Study ID / Record ID</span>
+            <span>Input preview</span>
+            <span>Model</span>
+            <span>Prompt</span>
+            <span>Started / completed</span>
+            <span>Duration</span>
+            <span>Result preview</span>
+            <span>Actions</span>
+          </div>
+          <div id="textTableViewport" class="text-table-viewport" tabindex="0">
+            <div id="textVirtualSpacer" class="text-virtual-spacer"></div>
+            <div id="textVirtualRows" class="text-virtual-rows"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <input id="currentProjectId" type="hidden" value="{{ current_project.project_id }}" />
+    <script id="projectData" type="application/json">{{ projects | tojson }}</script>
+    <script id="modelPresetData" type="application/json">{{ model_presets | tojson }}</script>
+    <script src="/static/text_extraction.js?v=20260604-text"></script>
+  </body>
+</html>

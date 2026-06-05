@@ -101,16 +101,24 @@ class SharedHelperTests(unittest.TestCase):
         finally:
             openai_rq.OPENAI_API_KEY_FILE = original_key_file
 
-    def test_gpt54_mini_high_preset_is_public_openai_model(self) -> None:
-        settings = JobSettings.from_form({"rq_model_preset": "openai_gpt54_mini_high"})
+    def test_gpt54_nano_xhigh_preset_is_public_openai_model(self) -> None:
+        settings = JobSettings.from_form({"rq_model_preset": "openai_gpt54_nano_xhigh"})
         self.assertEqual(settings.rq_provider, "openai")
-        self.assertEqual(settings.rq_screening_model, "gpt-5.4-mini")
+        self.assertEqual(settings.rq_screening_model, "gpt-5.4-nano")
         self.assertTrue(settings.rq_enable_thinking)
-        self.assertEqual(settings.openai_reasoning_effort, "high")
+        self.assertEqual(settings.openai_reasoning_effort, "xhigh")
 
         public_presets = {preset["id"]: preset for preset in public_model_presets()}
-        self.assertIn("openai_gpt54_mini_high", public_presets)
-        self.assertEqual(public_presets["openai_gpt54_mini_high"]["settings"]["model"], "gpt-5.4-mini")
+        self.assertIn("openai_gpt54_nano_xhigh", public_presets)
+        self.assertNotIn("openai_gpt54_mini_high", public_presets)
+        self.assertEqual(public_presets["openai_gpt54_nano_xhigh"]["settings"]["model"], "gpt-5.4-nano")
+        self.assertEqual(public_presets["openai_gpt54_nano_xhigh"]["settings"]["openai_reasoning_effort"], "xhigh")
+
+    def test_gpt54_mini_high_preset_aliases_to_nano_xhigh(self) -> None:
+        settings = JobSettings.from_form({"rq_model_preset": "openai_gpt54_mini_high"})
+        self.assertEqual(settings.rq_provider, "openai")
+        self.assertEqual(settings.rq_screening_model, "gpt-5.4-nano")
+        self.assertEqual(settings.openai_reasoning_effort, "xhigh")
 
     def test_openai_pdf_file_mode_is_openai_only(self) -> None:
         openai_settings = JobSettings.from_form(
@@ -136,13 +144,13 @@ class SharedHelperTests(unittest.TestCase):
             openai_rq.run_event_process = fake_runner
             openai_rq.run_openai_rq(
                 job_id="job-file",
-                model="gpt-5.4-mini",
+                model="gpt-5.4-nano",
                 system_prompt_file=Path("system.txt"),
                 user_prompt_file=Path("user.txt"),
                 output_file=Path("out.md"),
                 max_tokens=100,
                 enable_reasoning=True,
-                reasoning_effort="high",
+                reasoning_effort="xhigh",
                 input_file_id="file-abc",
             )
         finally:
@@ -301,7 +309,7 @@ class JobIdentityTests(unittest.TestCase):
                 self.assertEqual(metadata["reused_ocr_from_job_id"], "source")
                 self.assertEqual(metadata["rq_prompt_filename"], "prompt2.txt")
                 self.assertEqual(metadata["rq_screening_model"], config.RQ_SCREENING_MODEL)
-                self.assertEqual(metadata["rq_max_tokens"], 30000)
+                self.assertEqual(metadata["rq_max_tokens"], config.RQ_SCREENING_MAX_TOKENS)
                 self.assertTrue(metadata["rq_enable_thinking"])
                 self.assertTrue(metadata["pending_rerun_screening_only"])
         finally:
@@ -585,18 +593,24 @@ class RerunEndpointTests(unittest.TestCase):
 
         original_data_dir = config.DATA_DIR
         original_jobs_dir = config.JOBS_DIR
+        original_projects_dir = config.PROJECTS_DIR
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
                 root = Path(tmpdir)
                 config.DATA_DIR = root / "data"
                 config.JOBS_DIR = config.DATA_DIR / "jobs"
+                config.PROJECTS_DIR = config.DATA_DIR / "projects"
                 config.JOBS_DIR.mkdir(parents=True, exist_ok=True)
+                config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
                 job_queue.pause()
+                from app.services import projects
+
+                project_id = projects.get_default_project()["project_id"]
 
                 source_settings = JobSettings.from_form(
                     {"rq_prompt_filename": "prompt1.txt", "rq_model_preset": "openai_gpt5_mini_high"}
                 )
-                source_root = jobs.create_job("source", "same-file.pdf", source_settings)
+                source_root = jobs.create_job("source", "same-file.pdf", source_settings, project_id=project_id)
                 (source_root / "input" / "uploaded.pdf").write_bytes(b"%PDF source")
                 (source_root / "outputs" / "merged_full_text.txt").write_text(
                     "merged OCR text long enough to reuse",
@@ -617,6 +631,7 @@ class RerunEndpointTests(unittest.TestCase):
                         "rq_model_preset": "qwen35_9b_8bit_reasoning",
                         "rq_prompt_filename": "prompt2.txt",
                         "rq_system_prompt": "Use the user-provided text.",
+                        "project_id": project_id,
                     },
                 )
                 self.assertEqual(response.status_code, 200)
@@ -628,14 +643,15 @@ class RerunEndpointTests(unittest.TestCase):
                 self.assertEqual(child_metadata["rerun_created_from_job_id"], "source")
                 self.assertEqual(child_metadata["rq_prompt_filename"], "prompt2.txt")
                 self.assertEqual(child_metadata["rq_screening_model"], config.RQ_SCREENING_MODEL)
-                self.assertEqual(child_metadata["rq_max_tokens"], 30000)
+                self.assertEqual(child_metadata["rq_max_tokens"], config.RQ_SCREENING_MAX_TOKENS)
                 self.assertTrue(child_metadata["rq_enable_thinking"])
 
-                job_queue.clean_queued()
-                job_queue.resume()
+                job_queue.clean_queued(project_id=project_id)
+                job_queue.resume(project_id=project_id)
         finally:
             config.DATA_DIR = original_data_dir
             config.JOBS_DIR = original_jobs_dir
+            config.PROJECTS_DIR = original_projects_dir
 
 
 class BackendSmokeTests(unittest.TestCase):

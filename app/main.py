@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,7 @@ from starlette.requests import Request
 
 from app import config
 from app.models import JobSettings, public_model_presets
-from app.services import jobs
+from app.services import jobs, projects, text_extraction
 from app.services.excel_summary import rebuild_summary_from_jobs
 from app.services.job_queue import JobQueue
 from app.services.local_inference_worker import local_inference_worker
@@ -29,8 +30,10 @@ job_queue = JobQueue()
 
 @app.on_event("startup")
 async def restore_queued_jobs() -> None:
+    projects.migrate_legacy_jobs_if_needed()
     local_inference_worker.terminate_stale_external_worker()
     job_queue.enqueue_existing_queued_jobs()
+    text_extraction.text_job_queue.enqueue_existing_queued_jobs()
 
 
 @app.on_event("shutdown")
@@ -39,17 +42,23 @@ async def stop_local_inference_worker() -> None:
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index() -> RedirectResponse:
-    return RedirectResponse(url="/rq-screening")
+async def index(project_id: str = "") -> RedirectResponse:
+    project = selected_project_or_default(project_id)
+    return RedirectResponse(url=projects.project_dashboard_path(project))
 
 
 @app.get("/rq-screening", response_class=HTMLResponse)
-async def rq_screening(request: Request) -> HTMLResponse:
+async def rq_screening(request: Request, project_id: str = "") -> HTMLResponse:
+    current_project = selected_project_or_default(project_id)
+    if projects.normalize_extraction_type(current_project.get("extraction_type")) == "text":
+        return RedirectResponse(url=projects.project_dashboard_path(current_project))  # type: ignore[return-value]
     return templates.TemplateResponse(
         request,
         "rq_screening.html",
         context={
             "request": request,
+            "current_project": current_project,
+            "projects": projects.list_projects(),
             "defaults": {
                 "ocr_dpi": config.DEFAULT_OCR_DPI,
                 "ocr_batch_size": config.DEFAULT_OCR_BATCH_SIZE,
@@ -61,11 +70,72 @@ async def rq_screening(request: Request) -> HTMLResponse:
     )
 
 
+@app.get("/text", response_class=HTMLResponse)
+async def text_extraction_screen(request: Request, project_id: str = "") -> HTMLResponse:
+    current_project = selected_project_or_default(project_id)
+    if projects.normalize_extraction_type(current_project.get("extraction_type")) == "pdf":
+        return RedirectResponse(url=projects.project_dashboard_path(current_project))  # type: ignore[return-value]
+    return templates.TemplateResponse(
+        request,
+        "text_extraction.html",
+        context={
+            "request": request,
+            "current_project": current_project,
+            "projects": projects.list_projects(),
+            "defaults": {
+                "rq_model_preset": "qwen35_9b_8bit_reasoning",
+            },
+            "model_presets": public_model_presets(),
+        },
+    )
+
+
+@app.get("/projects/new", response_class=HTMLResponse)
+async def new_project_form(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "project_new.html",
+        context={"request": request, "projects": projects.list_projects()},
+    )
+
+
+@app.post("/projects/new")
+async def create_project_form(
+    project_name: str = Form(...),
+    description: str = Form(""),
+    extraction_type: str = Form(projects.DEFAULT_EXTRACTION_TYPE),
+) -> RedirectResponse:
+    try:
+        project = projects.create_project(project_name, description, extraction_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return RedirectResponse(url=projects.project_dashboard_path(project), status_code=303)
+
+
+@app.get("/api/projects")
+async def api_list_projects() -> JSONResponse:
+    return JSONResponse({"projects": projects.list_projects(), "default_project": projects.get_default_project()})
+
+
+@app.post("/api/projects")
+async def api_create_project(
+    name: str = Form(...),
+    description: str = Form(""),
+    extraction_type: str = Form(projects.DEFAULT_EXTRACTION_TYPE),
+) -> JSONResponse:
+    try:
+        project = projects.create_project(name, description, extraction_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse({"project": project, "projects": projects.list_projects()})
+
+
 @app.post("/api/jobs")
 async def create_job(
     pdfs: list[UploadFile] | None = File(None),
     pdf: UploadFile | None = File(None),
     pdf_relative_paths: list[str] | None = Form(None),
+    project_id: str = Form(""),
     ocr_dpi: int = Form(config.DEFAULT_OCR_DPI),
     ocr_batch_size: int = Form(config.DEFAULT_OCR_BATCH_SIZE),
     deepseek_ocr_model_path: str = Form(""),
@@ -76,6 +146,8 @@ async def create_job(
     rq_system_prompt: str = Form(""),
     rerun_existing: bool = Form(False),
 ) -> JSONResponse:
+    current_project = selected_project_or_default(project_id)
+    active_project_id = str(current_project["project_id"])
     settings = settings_from_form(
         ocr_dpi=ocr_dpi,
         ocr_batch_size=ocr_batch_size,
@@ -99,6 +171,7 @@ async def create_job(
             settings.rq_prompt_filename,
             settings.rq_screening_model,
             settings.openai_input_mode,
+            project_id=active_project_id,
         )
         if existing is not None:
             if not rerun_existing:
@@ -106,7 +179,7 @@ async def create_job(
             existing_job_id = str(existing["job_id"])
             if existing_job_id in rerun_job_ids:
                 continue
-            job_queue.enqueue_screening_rerun(existing_job_id, settings)
+            job_queue.enqueue_screening_rerun(existing_job_id, settings, project_id=active_project_id)
             rerun_job_ids.add(existing_job_id)
             queued_jobs.append(
                 {
@@ -116,13 +189,14 @@ async def create_job(
                     "prompt_filename": settings.rq_prompt_filename,
                     "model": settings.rq_screening_model,
                     "openai_input_mode": settings.openai_input_mode,
+                    "project_id": active_project_id,
                 }
             )
             logger.info("Queued RQ screening rerun job %s for %s", existing_job_id, filename)
             continue
-        reusable_ocr = jobs.find_reusable_ocr_job_by_filename(filename)
+        reusable_ocr = jobs.find_reusable_ocr_job_by_filename(filename, project_id=active_project_id)
         job_id = jobs.new_job_id()
-        root = jobs.create_job(job_id, filename, settings)
+        root = jobs.create_job(job_id, filename, settings, project_id=active_project_id)
         dest = root / "input" / "uploaded.pdf"
         jobs.save_upload(upload.file, dest)
         pdf_sha256 = jobs.file_sha256(dest)
@@ -132,17 +206,18 @@ async def create_job(
             pdf_sha256=pdf_sha256,
             source_relative_path=relative_path,
             source_folder=source_folder_from_relative_path(relative_path),
+            project_id=active_project_id,
         )
         reusable_openai_file = (
-            jobs.find_reusable_openai_file_job(pdf_sha256, filename)
+            jobs.find_reusable_openai_file_job(pdf_sha256, filename, project_id=active_project_id)
             if settings.rq_provider == "openai" and settings.openai_input_mode == "pdf_file"
             else None
         )
         if reusable_openai_file is not None:
-            jobs.copy_reusable_openai_file(str(reusable_openai_file["job_id"]), root)
+            jobs.copy_reusable_openai_file(str(reusable_openai_file["job_id"]), root, source_project_id=active_project_id)
         elif reusable_ocr is not None and settings.openai_input_mode != "pdf_file":
-            jobs.copy_reusable_ocr(str(reusable_ocr["job_id"]), root)
-        job_queue.enqueue(job_id, settings)
+            jobs.copy_reusable_ocr(str(reusable_ocr["job_id"]), root, source_project_id=active_project_id)
+        job_queue.enqueue(job_id, settings, project_id=active_project_id)
         queued_jobs.append(
             {
                 "job_id": job_id,
@@ -150,6 +225,7 @@ async def create_job(
                 "prompt_filename": settings.rq_prompt_filename,
                 "model": settings.rq_screening_model,
                 "openai_input_mode": settings.openai_input_mode,
+                "project_id": active_project_id,
                 "reuses_ocr": "true" if reusable_ocr is not None and settings.openai_input_mode != "pdf_file" else "false",
                 "reuses_openai_file": "true" if reusable_openai_file is not None else "false",
             }
@@ -174,6 +250,7 @@ async def check_existing_jobs(
     pdfs: list[UploadFile] | None = File(None),
     pdf: UploadFile | None = File(None),
     pdf_relative_paths: list[str] | None = Form(None),
+    project_id: str = Form(""),
     ocr_dpi: int = Form(config.DEFAULT_OCR_DPI),
     ocr_batch_size: int = Form(config.DEFAULT_OCR_BATCH_SIZE),
     deepseek_ocr_model_path: str = Form(""),
@@ -183,6 +260,8 @@ async def check_existing_jobs(
     rq_prompt_filename: str = Form(config.DEFAULT_RQ_PROMPT_FILENAME),
     rq_system_prompt: str = Form(""),
 ) -> JSONResponse:
+    current_project = selected_project_or_default(project_id)
+    active_project_id = str(current_project["project_id"])
     settings = settings_from_form(
         ocr_dpi=ocr_dpi,
         ocr_batch_size=ocr_batch_size,
@@ -204,9 +283,10 @@ async def check_existing_jobs(
             settings.rq_prompt_filename,
             settings.rq_screening_model,
             settings.openai_input_mode,
+            project_id=active_project_id,
         )
         if existing is None:
-            fresh.append({"filename": filename, "source_relative_path": relative_path})
+            fresh.append({"filename": filename, "source_relative_path": relative_path, "project_id": active_project_id})
             continue
         existing_job_id = str(existing["job_id"])
         metadata = existing.get("metadata") or {}
@@ -214,6 +294,7 @@ async def check_existing_jobs(
             {
                 "filename": filename,
                 "source_relative_path": relative_path,
+                "project_id": active_project_id,
                 "existing_job_id": existing_job_id,
                 "existing_filename": str(existing.get("filename") or ""),
                 "prompt_filename": str(metadata.get("rq_prompt_filename") or settings.rq_prompt_filename),
@@ -265,24 +346,29 @@ async def get_rq_prompt_file(filename: str) -> JSONResponse:
 
 
 @app.get("/api/jobs")
-async def list_jobs(limit: int = 200) -> JSONResponse:
-    job_queue.mark_stale_running_jobs_failed()
-    return JSONResponse({"jobs": jobs.list_jobs(limit=limit)})
+async def list_jobs(limit: int = 200, project_id: str = "") -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    active_project_id = str(project["project_id"])
+    job_queue.mark_stale_running_jobs_failed(project_id=active_project_id)
+    return JSONResponse({"jobs": jobs.list_jobs(limit=limit, project_id=active_project_id), "project": project})
 
 
 @app.get("/api/queue")
-async def queue_status() -> JSONResponse:
-    return JSONResponse(job_queue.status())
+async def queue_status(project_id: str = "") -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    return JSONResponse(job_queue.status(project_id=str(project["project_id"])))
 
 
 @app.post("/api/queue/pause")
-async def pause_queue() -> JSONResponse:
-    return JSONResponse(job_queue.pause())
+async def pause_queue(project_id: str = Form("")) -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    return JSONResponse(job_queue.pause(project_id=str(project["project_id"])))
 
 
 @app.post("/api/queue/resume")
 async def resume_queue(
     preserve_settings: bool = Form(False),
+    project_id: str = Form(""),
     ocr_dpi: int = Form(config.DEFAULT_OCR_DPI),
     ocr_batch_size: int = Form(config.DEFAULT_OCR_BATCH_SIZE),
     deepseek_ocr_model_path: str = Form(""),
@@ -292,8 +378,10 @@ async def resume_queue(
     rq_prompt_filename: str = Form(config.DEFAULT_RQ_PROMPT_FILENAME),
     rq_system_prompt: str = Form(""),
 ) -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    active_project_id = str(project["project_id"])
     if preserve_settings:
-        return JSONResponse(job_queue.resume())
+        return JSONResponse(job_queue.resume(project_id=active_project_id))
     settings = settings_from_form(
         ocr_dpi=ocr_dpi,
         ocr_batch_size=ocr_batch_size,
@@ -304,19 +392,21 @@ async def resume_queue(
         rq_prompt_filename=rq_prompt_filename,
         rq_system_prompt=rq_system_prompt,
     )
-    return JSONResponse(job_queue.resume(settings_override=settings))
+    return JSONResponse(job_queue.resume(settings_override=settings, project_id=active_project_id))
 
 
 @app.post("/api/queue/retry-failed")
-async def retry_failed_jobs() -> JSONResponse:
-    result = job_queue.retry_failed()
+async def retry_failed_jobs(project_id: str = Form("")) -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    active_project_id = str(project["project_id"])
+    result = job_queue.retry_failed(project_id=active_project_id)
     requeued_jobs = result["jobs"]
     return JSONResponse(
         {
             "requeued": len(requeued_jobs),
             "jobs": requeued_jobs,
             "skipped": result["skipped"],
-            **job_queue.status(),
+            **job_queue.status(project_id=active_project_id),
         }
     )
 
@@ -324,6 +414,7 @@ async def retry_failed_jobs() -> JSONResponse:
 @app.post("/api/jobs/{job_id}/rerun")
 async def rerun_job_screening(
     job_id: str,
+    project_id: str = Form(""),
     ocr_dpi: int = Form(config.DEFAULT_OCR_DPI),
     ocr_batch_size: int = Form(config.DEFAULT_OCR_BATCH_SIZE),
     deepseek_ocr_model_path: str = Form(""),
@@ -333,10 +424,12 @@ async def rerun_job_screening(
     rq_prompt_filename: str = Form(config.DEFAULT_RQ_PROMPT_FILENAME),
     rq_system_prompt: str = Form(""),
 ) -> JSONResponse:
-    root = jobs.job_dir(job_id)
+    project = selected_project_or_default(project_id)
+    active_project_id = str(project["project_id"])
+    root = jobs.job_dir(job_id, active_project_id)
     if not root.exists():
         raise HTTPException(status_code=404, detail="Job not found")
-    if job_id in job_queue.active_job_ids():
+    if job_id in job_queue.active_job_ids(project_id=active_project_id):
         raise HTTPException(status_code=409, detail="Job is already queued or running.")
     settings = settings_from_form(
         ocr_dpi=ocr_dpi,
@@ -360,11 +453,11 @@ async def rerun_job_screening(
         )
     if not jobs.job_matches_run_identity(root, settings):
         try:
-            child_job_id, _child_root = jobs.create_screening_rerun_child_job(job_id, settings)
+            child_job_id, _child_root = jobs.create_screening_rerun_child_job(job_id, settings, project_id=active_project_id)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
-        job_queue.enqueue(child_job_id, settings)
-        refreshed = {item["job_id"]: item for item in jobs.list_jobs(limit=0)}
+        job_queue.enqueue(child_job_id, settings, project_id=active_project_id)
+        refreshed = {item["job_id"]: item for item in jobs.list_jobs(limit=0, project_id=active_project_id)}
         record = refreshed.get(child_job_id)
         return JSONResponse(
             {
@@ -374,47 +467,54 @@ async def rerun_job_screening(
                 "prompt_filename": settings.rq_prompt_filename,
                 "model": settings.rq_screening_model,
                 "openai_input_mode": settings.openai_input_mode,
-                **job_queue.status(),
+                "project_id": active_project_id,
+                **job_queue.status(project_id=active_project_id),
             }
         )
 
-    record = job_queue.enqueue_screening_rerun(job_id, settings)
+    record = job_queue.enqueue_screening_rerun(job_id, settings, project_id=active_project_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    return JSONResponse({"job": record, "created_new_job": False, **job_queue.status()})
+    return JSONResponse({"job": record, "created_new_job": False, **job_queue.status(project_id=active_project_id)})
 
 
 @app.post("/api/queue/clean")
-async def clean_queue() -> JSONResponse:
-    removed = job_queue.clean_queued()
-    return JSONResponse({"removed": len(removed), "jobs": removed, **job_queue.status()})
+async def clean_queue(project_id: str = Form("")) -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    active_project_id = str(project["project_id"])
+    removed = job_queue.clean_queued(project_id=active_project_id)
+    return JSONResponse({"removed": len(removed), "jobs": removed, **job_queue.status(project_id=active_project_id)})
 
 
 @app.delete("/api/jobs/{job_id}")
-async def delete_job(job_id: str) -> JSONResponse:
-    root = jobs.job_dir(job_id)
+async def delete_job(job_id: str, project_id: str = "") -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    active_project_id = str(project["project_id"])
+    root = jobs.job_dir(job_id, active_project_id)
     if not root.exists():
         raise HTTPException(status_code=404, detail="Job not found")
-    if job_id in job_queue.active_job_ids():
+    if job_id in job_queue.active_job_ids(project_id=active_project_id):
         raise HTTPException(status_code=409, detail="Job is queued or running and cannot be deleted.")
-    jobs.delete_job(job_id)
-    return JSONResponse({"deleted": True, "job_id": job_id, **job_queue.status()})
+    jobs.delete_job(job_id, project_id=active_project_id)
+    return JSONResponse({"deleted": True, "job_id": job_id, **job_queue.status(project_id=active_project_id)})
 
 
 @app.get("/api/jobs/{job_id}/status")
-async def job_status(job_id: str) -> JSONResponse:
+async def job_status(job_id: str, project_id: str = "") -> JSONResponse:
+    project = selected_project_or_default(project_id)
     try:
-        return JSONResponse(jobs.read_status(job_id))
+        return JSONResponse(jobs.read_status(job_id, project_id=str(project["project_id"])))
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Job not found")
 
 
 @app.get("/api/jobs/{job_id}/result")
-async def job_result(job_id: str) -> JSONResponse:
-    root = jobs.job_dir(job_id)
+async def job_result(job_id: str, project_id: str = "") -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    root = jobs.job_dir(job_id, str(project["project_id"]))
     if not root.exists():
         raise HTTPException(status_code=404, detail="Job not found")
-    status = jobs.read_status(job_id)
+    status = jobs.read_status(job_id, project_id=str(project["project_id"]))
     metadata = jobs.read_metadata(root)
     output = read_text_if_exists(root / "outputs" / "rq_screening_output.md")
     merged = read_text_if_exists(root / "outputs" / "merged_full_text.txt")
@@ -436,17 +536,19 @@ async def job_result(job_id: str) -> JSONResponse:
 
 
 @app.get("/api/jobs/{job_id}/download")
-async def download_result(job_id: str) -> FileResponse:
-    output = jobs.job_dir(job_id) / "outputs" / "rq_screening_output.md"
+async def download_result(job_id: str, project_id: str = "") -> FileResponse:
+    project = selected_project_or_default(project_id)
+    output = jobs.job_dir(job_id, str(project["project_id"])) / "outputs" / "rq_screening_output.md"
     if not output.exists():
         raise HTTPException(status_code=404, detail="Result is not available yet")
     return FileResponse(output, media_type="text/markdown", filename=f"{job_id}_rq_screening.md")
 
 
 @app.get("/api/reports/excel")
-async def download_excel_report() -> FileResponse:
+async def download_excel_report(project_id: str = "") -> FileResponse:
+    project = selected_project_or_default(project_id)
     try:
-        path = rebuild_summary_from_jobs()
+        path = rebuild_summary_from_jobs(project_id=str(project["project_id"]))
     except Exception as exc:
         logger.exception("Failed to build Excel report")
         raise HTTPException(status_code=500, detail=f"Failed to build Excel report: {exc}")
@@ -459,10 +561,193 @@ async def download_excel_report() -> FileResponse:
     )
 
 
+@app.post("/api/text/jobs")
+async def create_text_jobs(
+    spreadsheet: UploadFile = File(...),
+    project_id: str = Form(""),
+    column_mappings: str = Form("[]"),
+    study_id_column: str = Form(""),
+    rq_model_preset: str = Form("qwen35_9b_8bit_reasoning"),
+    openai_api_key: str = Form(""),
+    rq_prompt_filename: str = Form(config.DEFAULT_RQ_PROMPT_FILENAME),
+    rq_system_prompt: str = Form(""),
+) -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    active_project_id = str(project["project_id"])
+    ensure_project_type(project, "text")
+    settings = settings_from_form(
+        ocr_dpi=config.DEFAULT_OCR_DPI,
+        ocr_batch_size=config.DEFAULT_OCR_BATCH_SIZE,
+        deepseek_ocr_model_path="",
+        rq_model_preset=rq_model_preset,
+        openai_api_key=openai_api_key,
+        openai_input_mode="ocr_text",
+        rq_prompt_filename=rq_prompt_filename,
+        rq_system_prompt=rq_system_prompt,
+    )
+    try:
+        mappings = parse_text_column_mappings(column_mappings)
+        result = text_extraction.create_text_jobs_from_upload(
+            project_id=active_project_id,
+            upload_file=spreadsheet,
+            settings=settings,
+            column_mappings=mappings,
+            study_id_column=study_id_column,
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Failed to create text extraction jobs")
+        raise HTTPException(status_code=500, detail=f"Failed to create text extraction jobs: {exc}")
+    return JSONResponse({"project": project, **result})
+
+
+@app.get("/api/text/jobs")
+async def list_text_jobs(
+    project_id: str = "",
+    offset: int = 0,
+    limit: int = 100,
+    status: str = "all",
+    search: str = "",
+) -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "text")
+    try:
+        payload = text_extraction.list_text_jobs(
+            project_id=str(project["project_id"]),
+            offset=offset,
+            limit=limit,
+            status=status,
+            search=search,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse({"project": project, **payload})
+
+
+@app.get("/api/text/jobs/counts")
+async def text_job_counts(project_id: str = "") -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "text")
+    try:
+        counts = text_extraction.text_job_counts(str(project["project_id"]))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse({"project": project, "counts": counts, "queue": text_extraction.text_job_queue.status(project_id=str(project["project_id"]))})
+
+
+@app.post("/api/text/queue/pause")
+async def pause_text_queue(project_id: str = Form("")) -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "text")
+    return JSONResponse(text_extraction.text_job_queue.pause(project_id=str(project["project_id"])))
+
+
+@app.post("/api/text/queue/resume")
+async def resume_text_queue(project_id: str = Form("")) -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "text")
+    return JSONResponse(text_extraction.text_job_queue.resume(project_id=str(project["project_id"])))
+
+
+@app.post("/api/text/jobs/retry-failed")
+async def retry_failed_text_jobs(project_id: str = Form("")) -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "text")
+    try:
+        result = text_extraction.retry_failed_text_jobs(str(project["project_id"]))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse(result)
+
+
+@app.get("/api/text/jobs/{job_id}/output")
+async def text_job_output(job_id: str, project_id: str = "") -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "text")
+    try:
+        return JSONResponse(text_extraction.read_text_job_output(str(project["project_id"]), job_id))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/text/jobs/{job_id}/retry")
+async def retry_text_job(job_id: str, project_id: str = Form("")) -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "text")
+    try:
+        job = text_extraction.retry_text_job(str(project["project_id"]), job_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse({"job": job, **text_extraction.text_job_queue.status(project_id=str(project["project_id"]))})
+
+
+@app.get("/api/text/export")
+async def download_text_export(project_id: str = "") -> FileResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "text")
+    try:
+        path = text_extraction.export_text_results(str(project["project_id"]))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Failed to build text extraction export")
+        raise HTTPException(status_code=500, detail=f"Failed to build text extraction export: {exc}")
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Text extraction export is not available.")
+    return FileResponse(
+        path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=path.name,
+    )
+
+
 def read_text_if_exists(path: Path) -> str:
     if not path.exists():
         return ""
     return path.read_text(encoding="utf-8")
+
+
+def selected_project_or_default(project_id: str | None = "") -> dict[str, Any]:
+    raw_project_id = str(project_id or "").strip()
+    try:
+        if raw_project_id:
+            return projects.get_project(raw_project_id)
+        return projects.get_default_project()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+def ensure_project_type(project: dict[str, Any], extraction_type: str) -> None:
+    actual = projects.normalize_extraction_type(project.get("extraction_type"))
+    if actual != extraction_type:
+        raise HTTPException(status_code=400, detail=f"Project is a {actual} extraction project, not {extraction_type}.")
+
+
+def parse_text_column_mappings(raw: str) -> list[dict[str, str]]:
+    try:
+        payload = json.loads(raw or "[]")
+    except json.JSONDecodeError as exc:
+        raise ValueError("Column mappings must be valid JSON.") from exc
+    if not isinstance(payload, list):
+        raise ValueError("Column mappings must be a list.")
+    mappings: list[dict[str, str]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            raise ValueError("Each column mapping must be an object.")
+        mappings.append(
+            {
+                "column_name": str(item.get("column_name") or item.get("column") or ""),
+                "prompt_label": str(item.get("prompt_label") or item.get("label") or ""),
+            }
+        )
+    return mappings
 
 
 def settings_from_form(
