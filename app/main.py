@@ -13,7 +13,7 @@ from starlette.requests import Request
 
 from app import config
 from app.models import JobSettings, public_model_presets
-from app.services import jobs, projects, text_extraction
+from app.services import jobs, projects, structured_extraction, text_extraction
 from app.services.excel_summary import rebuild_summary_from_jobs
 from app.services.job_queue import JobQueue
 from app.services.local_inference_worker import local_inference_worker
@@ -50,7 +50,7 @@ async def index(project_id: str = "") -> RedirectResponse:
 @app.get("/rq-screening", response_class=HTMLResponse)
 async def rq_screening(request: Request, project_id: str = "") -> HTMLResponse:
     current_project = selected_project_or_default(project_id)
-    if projects.normalize_extraction_type(current_project.get("extraction_type")) == "text":
+    if projects.normalize_extraction_type(current_project.get("extraction_type")) != "pdf":
         return RedirectResponse(url=projects.project_dashboard_path(current_project))  # type: ignore[return-value]
     return templates.TemplateResponse(
         request,
@@ -73,7 +73,7 @@ async def rq_screening(request: Request, project_id: str = "") -> HTMLResponse:
 @app.get("/text", response_class=HTMLResponse)
 async def text_extraction_screen(request: Request, project_id: str = "") -> HTMLResponse:
     current_project = selected_project_or_default(project_id)
-    if projects.normalize_extraction_type(current_project.get("extraction_type")) == "pdf":
+    if projects.normalize_extraction_type(current_project.get("extraction_type")) != "text":
         return RedirectResponse(url=projects.project_dashboard_path(current_project))  # type: ignore[return-value]
     return templates.TemplateResponse(
         request,
@@ -83,6 +83,29 @@ async def text_extraction_screen(request: Request, project_id: str = "") -> HTML
             "current_project": current_project,
             "projects": projects.list_projects(),
             "defaults": {
+                "rq_model_preset": "qwen35_9b_8bit_reasoning",
+            },
+            "model_presets": public_model_presets(),
+        },
+    )
+
+
+@app.get("/structured-pdf", response_class=HTMLResponse)
+async def structured_pdf_screen(request: Request, project_id: str = "") -> HTMLResponse:
+    current_project = selected_project_or_default(project_id)
+    if projects.normalize_extraction_type(current_project.get("extraction_type")) != "pdf_structured":
+        return RedirectResponse(url=projects.project_dashboard_path(current_project))  # type: ignore[return-value]
+    return templates.TemplateResponse(
+        request,
+        "structured_pdf.html",
+        context={
+            "request": request,
+            "current_project": current_project,
+            "projects": projects.list_projects(),
+            "defaults": {
+                "ocr_dpi": config.DEFAULT_OCR_DPI,
+                "ocr_batch_size": config.DEFAULT_OCR_BATCH_SIZE,
+                "deepseek_ocr_model_path": "",
                 "rq_model_preset": "qwen35_9b_8bit_reasoning",
             },
             "model_presets": public_model_presets(),
@@ -561,6 +584,315 @@ async def download_excel_report(project_id: str = "") -> FileResponse:
     )
 
 
+@app.get("/api/structured/sheets")
+async def structured_sheets(project_id: str = "") -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "pdf_structured")
+    try:
+        sheets = structured_extraction.list_sheets(str(project["project_id"]))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse({"project": project, "sheets": sheets})
+
+
+@app.post("/api/structured/sheets")
+async def create_structured_sheet(
+    project_id: str = Form(""),
+    name: str = Form(...),
+    context: str = Form(""),
+    row_unit: str = Form(""),
+    columns: str = Form("[]"),
+) -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "pdf_structured")
+    try:
+        sheet = structured_extraction.create_sheet(
+            project_id=str(project["project_id"]),
+            name=name,
+            context=context,
+            row_unit=row_unit,
+            columns=parse_structured_columns(columns),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse({"project": project, "sheet": sheet, "sheets": structured_extraction.list_sheets(str(project["project_id"]))})
+
+
+@app.post("/api/structured/sheets/parse-import")
+async def parse_structured_sheet_import(
+    project_id: str = Form(""),
+    sheet_id: str = Form(""),
+    block_text: str = Form(...),
+    current_name: str = Form(""),
+    current_context: str = Form(""),
+    current_row_unit: str = Form(""),
+    current_columns: str = Form("[]"),
+) -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "pdf_structured")
+    try:
+        if sheet_id:
+            sheet = structured_extraction.get_sheet(str(project["project_id"]), sheet_id)
+            if structured_extraction.sheet_is_locked(sheet):
+                raise ValueError("This sheet is locked for reproducibility. Duplicate it to edit the schema.")
+        current_sheet = {
+            "name": current_name,
+            "context": current_context,
+            "row_unit": current_row_unit,
+            "columns": parse_structured_columns(current_columns),
+        }
+        payload = structured_extraction.parse_sheet_import(block_text, current_sheet=current_sheet)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse({"project": project, **payload})
+
+
+@app.get("/api/structured/sheets/{sheet_id}")
+async def get_structured_sheet(sheet_id: str, project_id: str = "") -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "pdf_structured")
+    try:
+        sheet = structured_extraction.get_sheet(str(project["project_id"]), sheet_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse({"project": project, "sheet": sheet})
+
+
+@app.put("/api/structured/sheets/{sheet_id}")
+async def update_structured_sheet(
+    sheet_id: str,
+    project_id: str = Form(""),
+    name: str = Form(...),
+    context: str = Form(""),
+    row_unit: str = Form(""),
+    columns: str = Form("[]"),
+) -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "pdf_structured")
+    try:
+        sheet = structured_extraction.update_sheet(
+            project_id=str(project["project_id"]),
+            sheet_id=sheet_id,
+            name=name,
+            context=context,
+            row_unit=row_unit,
+            columns=parse_structured_columns(columns),
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse({"project": project, "sheet": sheet, "sheets": structured_extraction.list_sheets(str(project["project_id"]))})
+
+
+@app.delete("/api/structured/sheets/{sheet_id}")
+async def delete_structured_sheet(sheet_id: str, project_id: str = "") -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "pdf_structured")
+    try:
+        structured_extraction.delete_sheet(str(project["project_id"]), sheet_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse({"deleted": True, "sheet_id": sheet_id, "sheets": structured_extraction.list_sheets(str(project["project_id"]))})
+
+
+@app.post("/api/structured/sheets/{sheet_id}/duplicate")
+async def duplicate_structured_sheet(sheet_id: str, project_id: str = Form("")) -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "pdf_structured")
+    try:
+        sheet = structured_extraction.duplicate_sheet(str(project["project_id"]), sheet_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse({"project": project, "sheet": sheet, "sheets": structured_extraction.list_sheets(str(project["project_id"]))})
+
+
+@app.post("/api/structured/columns/parse-blocks")
+async def parse_structured_column_blocks(block_text: str = Form(...)) -> JSONResponse:
+    try:
+        columns = structured_extraction.parse_column_blocks(block_text)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse({"columns": columns, "count": len(columns)})
+
+
+@app.post("/api/structured/jobs")
+async def create_structured_jobs(
+    pdfs: list[UploadFile] | None = File(None),
+    pdf: UploadFile | None = File(None),
+    pdf_relative_paths: list[str] | None = Form(None),
+    project_id: str = Form(""),
+    sheet_id: str = Form(...),
+    ocr_dpi: int = Form(config.DEFAULT_OCR_DPI),
+    ocr_batch_size: int = Form(config.DEFAULT_OCR_BATCH_SIZE),
+    deepseek_ocr_model_path: str = Form(""),
+    rq_model_preset: str = Form("qwen35_9b_8bit_reasoning"),
+    openai_api_key: str = Form(""),
+    openai_input_mode: str = Form("ocr_text"),
+) -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    active_project_id = str(project["project_id"])
+    ensure_project_type(project, "pdf_structured")
+    try:
+        sheet = structured_extraction.get_sheet(active_project_id, sheet_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    compiled_prompt = structured_extraction.compile_sheet_prompt(sheet)
+    settings = settings_from_form(
+        ocr_dpi=ocr_dpi,
+        ocr_batch_size=ocr_batch_size,
+        deepseek_ocr_model_path=deepseek_ocr_model_path,
+        rq_model_preset=rq_model_preset,
+        openai_api_key=openai_api_key,
+        openai_input_mode=openai_input_mode,
+        rq_prompt_filename=f"structured_{sheet_id}.txt",
+        rq_system_prompt=compiled_prompt,
+    )
+    pdf_uploads = validated_pdf_uploads(pdfs, pdf)
+    upload_relative_paths = normalized_relative_paths(pdf_uploads, pdf_relative_paths)
+    queued_jobs: list[dict[str, str]] = []
+    locked_sheet = sheet
+    for upload, relative_path in zip(pdf_uploads, upload_relative_paths):
+        filename = upload_display_filename(upload)
+        reusable_ocr = jobs.find_reusable_ocr_job_by_filename(filename, project_id=active_project_id)
+        job_id = jobs.new_job_id()
+        root = jobs.create_job(job_id, filename, settings, project_id=active_project_id)
+        dest = root / "input" / "uploaded.pdf"
+        jobs.save_upload(upload.file, dest)
+        pdf_sha256 = jobs.file_sha256(dest)
+        jobs.update_metadata(
+            root,
+            uploaded_pdf=str(dest),
+            pdf_sha256=pdf_sha256,
+            source_relative_path=relative_path,
+            source_folder=source_folder_from_relative_path(relative_path),
+            project_id=active_project_id,
+            extraction_type="pdf_structured",
+            structured_sheet_id=sheet_id,
+            structured_sheet_name=str(sheet.get("name") or sheet_id),
+            structured_columns=sheet.get("columns") or [],
+            structured_row_unit=str(sheet.get("row_unit") or ""),
+            structured_context=str(sheet.get("context") or ""),
+            structured_compiled_prompt=compiled_prompt,
+        )
+        if not queued_jobs:
+            locked_sheet = structured_extraction.lock_sheet_for_first_run(active_project_id, sheet_id, job_id)
+        reusable_openai_file = (
+            jobs.find_reusable_openai_file_job(pdf_sha256, filename, project_id=active_project_id)
+            if settings.rq_provider == "openai" and settings.openai_input_mode == "pdf_file"
+            else None
+        )
+        if reusable_openai_file is not None:
+            jobs.copy_reusable_openai_file(str(reusable_openai_file["job_id"]), root, source_project_id=active_project_id)
+        elif reusable_ocr is not None and settings.openai_input_mode != "pdf_file":
+            jobs.copy_reusable_ocr(str(reusable_ocr["job_id"]), root, source_project_id=active_project_id)
+        job_queue.enqueue(job_id, settings, project_id=active_project_id)
+        queued_jobs.append(
+            {
+                "job_id": job_id,
+                "filename": filename,
+                "project_id": active_project_id,
+                "sheet_id": sheet_id,
+                "sheet_name": str(sheet.get("name") or sheet_id),
+                "model": settings.rq_screening_model,
+                "openai_input_mode": settings.openai_input_mode,
+            }
+        )
+        logger.info("Queued structured PDF extraction job %s for %s", job_id, filename)
+    return JSONResponse(
+        {
+            "project": project,
+            "sheet": locked_sheet,
+            "job_id": queued_jobs[0]["job_id"] if queued_jobs else None,
+            "job_ids": [job["job_id"] for job in queued_jobs],
+            "jobs": queued_jobs,
+            "count": len(queued_jobs),
+        }
+    )
+
+
+@app.get("/api/structured/jobs")
+async def list_structured_jobs(project_id: str = "") -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "pdf_structured")
+    job_queue.mark_stale_running_jobs_failed(project_id=str(project["project_id"]))
+    return JSONResponse(
+        {
+            "project": project,
+            "jobs": structured_extraction.list_structured_jobs(str(project["project_id"])),
+            "queue": job_queue.status(project_id=str(project["project_id"])),
+        }
+    )
+
+
+@app.get("/api/structured/jobs/{job_id}/result")
+async def structured_job_result(job_id: str, project_id: str = "") -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "pdf_structured")
+    try:
+        payload = structured_extraction.structured_job_result(str(project["project_id"]), job_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse({"project": project, **payload})
+
+
+@app.get("/api/structured/rows")
+async def structured_rows(
+    project_id: str = "",
+    sheet_id: str = "",
+    offset: int = 0,
+    limit: int = 100,
+    search: str = "",
+) -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "pdf_structured")
+    try:
+        payload = structured_extraction.list_rows(
+            project_id=str(project["project_id"]),
+            sheet_id=sheet_id,
+            offset=offset,
+            limit=limit,
+            search=search,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse({"project": project, **payload})
+
+
+@app.get("/api/structured/export")
+async def download_structured_export(project_id: str = "") -> FileResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "pdf_structured")
+    try:
+        path = structured_extraction.export_structured_workbook(str(project["project_id"]))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Failed to build structured PDF export")
+        raise HTTPException(status_code=500, detail=f"Failed to build structured PDF export: {exc}")
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Structured PDF export is not available.")
+    return FileResponse(
+        path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=path.name,
+    )
+
+
 @app.post("/api/text/jobs")
 async def create_text_jobs(
     spreadsheet: UploadFile = File(...),
@@ -748,6 +1080,27 @@ def parse_text_column_mappings(raw: str) -> list[dict[str, str]]:
             }
         )
     return mappings
+
+
+def parse_structured_columns(raw: str) -> list[dict[str, str]]:
+    try:
+        payload = json.loads(raw or "[]")
+    except json.JSONDecodeError as exc:
+        raise ValueError("Structured columns must be valid JSON.") from exc
+    if not isinstance(payload, list):
+        raise ValueError("Structured columns must be a list.")
+    columns: list[dict[str, str]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            raise ValueError("Each structured column must be an object.")
+        columns.append(
+            {
+                "column_name": str(item.get("column_name") or item.get("name") or ""),
+                "question": str(item.get("question") or ""),
+                "rules": str(item.get("rules") or ""),
+            }
+        )
+    return columns
 
 
 def settings_from_form(

@@ -28,6 +28,22 @@ def complete_screening_job(
     duration_seconds = round(time.time() - started_at, 2)
     root = jobs.job_dir(job_id, project_id)
     metadata = jobs.read_metadata(root)
+    if metadata.get("extraction_type") == "pdf_structured":
+        from app.services import structured_extraction
+
+        structured_extraction.complete_structured_job(
+            job_id=job_id,
+            settings=settings,
+            project_id=project_id,
+            started_at=started_at,
+            prompt_filename=prompt_filename,
+            prompt_source_path=prompt_source_path,
+            system_prompt_file=system_prompt_file,
+            user_prompt_file=user_prompt_file,
+            output_file=output_file,
+            pdf_path=pdf_path,
+        )
+        return
     original_filename = str(metadata.get("original_filename") or pdf_path.name)
     llm_output = output_file.read_text(encoding="utf-8")
     try:

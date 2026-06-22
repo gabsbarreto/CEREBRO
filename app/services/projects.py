@@ -17,6 +17,7 @@ DEFAULT_EXTRACTION_TYPE = "pdf"
 EXTRACTION_TYPE_LABELS = {
     "pdf": "PDF extraction",
     "text": "Text extraction",
+    "pdf_structured": "Structured PDF extraction",
 }
 
 _SAFE_PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -169,8 +170,11 @@ def project_summary_path(project_id: str) -> Path:
 
 def project_dashboard_path(project: dict[str, Any]) -> str:
     project_id = validate_project_id(str(project.get("project_id") or ""))
-    if normalize_extraction_type(project.get("extraction_type")) == "text":
+    extraction_type = normalize_extraction_type(project.get("extraction_type"))
+    if extraction_type == "text":
         return f"/text?project_id={project_id}"
+    if extraction_type == "pdf_structured":
+        return f"/structured-pdf?project_id={project_id}"
     return f"/rq-screening?project_id={project_id}"
 
 
@@ -247,4 +251,6 @@ def normalize_extraction_type(value: Any) -> str:
         return "pdf"
     if extraction_type in {"text", "text_extraction", "spreadsheet"}:
         return "text"
-    raise ValueError("Project extraction type must be 'pdf' or 'text'.")
+    if extraction_type in {"pdf_structured", "structured_pdf", "structured_pdf_extraction"}:
+        return "pdf_structured"
+    raise ValueError("Project extraction type must be 'pdf', 'text', or 'pdf_structured'.")

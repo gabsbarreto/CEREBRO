@@ -654,6 +654,481 @@ class RerunEndpointTests(unittest.TestCase):
             config.PROJECTS_DIR = original_projects_dir
 
 
+class StructuredExtractionTests(unittest.TestCase):
+    def test_project_type_normalizes_structured_pdf(self) -> None:
+        from app.services import projects
+
+        self.assertEqual(projects.normalize_extraction_type("pdf_structured"), "pdf_structured")
+        self.assertEqual(projects.normalize_extraction_type("structured-pdf"), "pdf_structured")
+        self.assertEqual(projects.normalize_extraction_type("structured_pdf_extraction"), "pdf_structured")
+
+    def test_sheet_creation_loading_and_rows_are_project_scoped(self) -> None:
+        from app.services import projects, structured_extraction
+
+        original_projects_dir = config.PROJECTS_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config.PROJECTS_DIR = Path(tmpdir) / "projects"
+                config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+                project = projects.create_project("Structured A", "", "pdf_structured")
+                other_project = projects.create_project("Structured B", "", "pdf_structured")
+                sheet = structured_extraction.create_sheet(
+                    project_id=str(project["project_id"]),
+                    name="Species characteristics",
+                    context="Wild animal review",
+                    row_unit="One row per species.",
+                    columns=[
+                        {
+                            "column_name": "SpeciesLatinArticle",
+                            "question": "State the scientific name.",
+                            "rules": "Enter NA if absent.",
+                        }
+                    ],
+                )
+
+                self.assertEqual(sheet["project_id"], project["project_id"])
+                self.assertIn("compiled_prompt", sheet)
+                self.assertEqual(len(structured_extraction.list_sheets(str(project["project_id"]))), 1)
+                self.assertEqual(structured_extraction.list_sheets(str(other_project["project_id"])), [])
+
+                row = {
+                    "row_id": "row-1",
+                    "sheet_id": sheet["sheet_id"],
+                    "project_id": project["project_id"],
+                    "job_id": "job-1",
+                    "source_pdf": "paper.pdf",
+                    "extracted_at": "2026-06-19T00:00:00Z",
+                    "model": "gpt-5.4-nano",
+                    "parse_status": "parsed",
+                    "parse_error": "",
+                    "cells": {"SpeciesLatinArticle": "Ailuropoda melanoleuca"},
+                }
+                structured_extraction.replace_job_sheet_records(
+                    str(project["project_id"]),
+                    str(sheet["sheet_id"]),
+                    "job-1",
+                    [row],
+                    [],
+                )
+
+                payload = structured_extraction.list_rows(
+                    project_id=str(project["project_id"]),
+                    sheet_id=str(sheet["sheet_id"]),
+                    search="Ailuropoda",
+                )
+                self.assertEqual(payload["total"], 1)
+
+                other_sheet = structured_extraction.create_sheet(
+                    project_id=str(other_project["project_id"]),
+                    name="Other sheet",
+                    row_unit="One row per intervention.",
+                    columns=[{"column_name": "Intervention", "question": "State the intervention.", "rules": ""}],
+                )
+                other_payload = structured_extraction.list_rows(
+                    project_id=str(other_project["project_id"]),
+                    sheet_id=str(other_sheet["sheet_id"]),
+                )
+                self.assertEqual(other_payload["total"], 0)
+        finally:
+            config.PROJECTS_DIR = original_projects_dir
+
+    def test_structured_sheet_drafts_load_before_questions_are_complete(self) -> None:
+        from app.services import projects, structured_extraction
+
+        original_projects_dir = config.PROJECTS_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config.PROJECTS_DIR = Path(tmpdir) / "projects"
+                config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+                project = projects.create_project("Structured Draft", "", "pdf_structured")
+                sheet = structured_extraction.create_sheet(
+                    project_id=str(project["project_id"]),
+                    name="Sheet 1",
+                    columns=[{"column_name": "Column1", "question": "", "rules": ""}],
+                )
+
+                self.assertFalse(sheet["schema_ready"])
+                self.assertIn("missing a question", sheet["schema_error"])
+                self.assertEqual(len(structured_extraction.list_sheets(str(project["project_id"]))), 1)
+                with self.assertRaises(ValueError):
+                    structured_extraction.compile_sheet_prompt(sheet)
+
+                saved = structured_extraction.update_sheet(
+                    project_id=str(project["project_id"]),
+                    sheet_id=str(sheet["sheet_id"]),
+                    name="Sheet 1",
+                    context="",
+                    row_unit="",
+                    columns=[{"column_name": "Column1", "question": "Extract the value.", "rules": ""}],
+                )
+                self.assertTrue(saved["schema_ready"])
+                self.assertIn("Other preferences:", saved["compiled_prompt"])
+        finally:
+            config.PROJECTS_DIR = original_projects_dir
+
+    def test_column_block_parser_compiler_and_tsv_parser(self) -> None:
+        from app.services import structured_extraction
+
+        columns = structured_extraction.parse_column_blocks(
+            """
+Column name ### SpeciesLatinArticle
+
+Question ### State the scientific name.
+
+Rules ###
+
+* Enter NA if absent.
+
+---
+
+Column name ### SpeciesCommonArticle
+
+Question ### State the common name.
+
+Rules ###
+
+* Use the article wording.
+"""
+        )
+        self.assertEqual([column["column_name"] for column in columns], ["SpeciesLatinArticle", "SpeciesCommonArticle"])
+        prompt = structured_extraction.compile_sheet_prompt(
+            {
+                "context": "General context.",
+                "row_unit": "One row per species.",
+                "columns": columns,
+            }
+        )
+        self.assertIn("SpeciesLatinArticle\tSpeciesCommonArticle", prompt)
+        self.assertIn("Do not include a Markdown table", prompt)
+
+        rows = structured_extraction.parse_tsv_output(
+            "SpeciesLatinArticle\tSpeciesCommonArticle\nAiluropoda melanoleuca\tgiant panda\nMartes foina\t",
+            ["SpeciesLatinArticle", "SpeciesCommonArticle"],
+        )
+        self.assertEqual(rows[0]["SpeciesCommonArticle"], "giant panda")
+        self.assertEqual(rows[1]["SpeciesCommonArticle"], "")
+
+    def test_sheet_import_parser_accepts_full_sheet_and_detects_conflicts(self) -> None:
+        from app.services import structured_extraction
+
+        payload = structured_extraction.parse_sheet_import(
+            """
+Sheet name ### Species characteristics
+
+Context ###
+Review of captive wild animal articles.
+
+More information / other preferences ###
+One row per eligible animal species.
+
+Columns ###
+
+Column name ### AnimalWelfare
+
+Question ### State the welfare outcome.
+
+Rules ###
+Enter NA if absent.
+
+---
+
+Column name ### AnimalInformation
+
+Question ### State the animal information.
+
+Rules ###
+Use article wording.
+""",
+            current_sheet={
+                "name": "Existing sheet",
+                "context": "Existing context.",
+                "row_unit": "",
+                "columns": [{"column_name": "AnimalWelfare", "question": "Old question", "rules": ""}],
+            },
+        )
+
+        self.assertEqual(payload["fields"]["name"], "Species characteristics")
+        self.assertEqual(payload["fields"]["context"], "Review of captive wild animal articles.")
+        self.assertEqual(payload["fields"]["row_unit"], "One row per eligible animal species.")
+        self.assertEqual([column["column_name"] for column in payload["columns"]], ["AnimalWelfare", "AnimalInformation"])
+        self.assertTrue(payload["has_conflicts"])
+        self.assertEqual(payload["conflicts"]["fields"], ["Context"])
+        self.assertEqual(payload["conflicts"]["columns"], ["AnimalWelfare"])
+
+    def test_sheet_import_parser_accepts_columns_only_and_validates(self) -> None:
+        from app.services import structured_extraction
+
+        payload = structured_extraction.parse_sheet_import(
+            """
+Column name ### SpeciesLatinArticle
+
+Question ### State the scientific name.
+
+Rules ###
+Enter NA if absent.
+""",
+            current_sheet={"columns": []},
+        )
+        self.assertEqual(payload["fields"], {})
+        self.assertEqual(payload["columns"][0]["column_name"], "SpeciesLatinArticle")
+        self.assertFalse(payload["has_conflicts"])
+
+        with self.assertRaises(ValueError):
+            structured_extraction.parse_sheet_import(
+                """
+Column name ### SpeciesLatinArticle
+
+Rules ###
+Missing a question.
+"""
+            )
+
+        with self.assertRaises(ValueError):
+            structured_extraction.parse_sheet_import(
+                """
+Column name ### SpeciesLatinArticle
+
+Question ### First question.
+
+Rules ###
+
+---
+
+Column name ### SpeciesLatinArticle
+
+Question ### Duplicate question.
+
+Rules ###
+"""
+            )
+
+    def test_tsv_parser_header_only_and_errors(self) -> None:
+        from app.services import structured_extraction
+
+        self.assertEqual(structured_extraction.parse_tsv_output("A\tB", ["A", "B"]), [])
+        with self.assertRaises(structured_extraction.StructuredParseError):
+            structured_extraction.parse_tsv_output("B\tA\n1\t2", ["A", "B"])
+        with self.assertRaises(structured_extraction.StructuredParseError):
+            structured_extraction.parse_tsv_output("A\tB\n1\t2\t3", ["A", "B"])
+        with self.assertRaises(structured_extraction.StructuredParseError):
+            structured_extraction.parse_tsv_output("| A | B |\n| 1 | 2 |", ["A", "B"])
+
+    def test_structured_export_smoke_test(self) -> None:
+        from openpyxl import load_workbook
+
+        from app.services import projects, structured_extraction
+
+        original_projects_dir = config.PROJECTS_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config.PROJECTS_DIR = Path(tmpdir) / "projects"
+                config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+                project = projects.create_project("Structured Export", "", "pdf_structured")
+                sheet = structured_extraction.create_sheet(
+                    project_id=str(project["project_id"]),
+                    name="Species characteristics",
+                    row_unit="One row per species.",
+                    columns=[{"column_name": "SpeciesLatinArticle", "question": "State the scientific name.", "rules": ""}],
+                )
+                structured_extraction.replace_job_sheet_records(
+                    str(project["project_id"]),
+                    str(sheet["sheet_id"]),
+                    "job-1",
+                    [
+                        {
+                            "row_id": "row-1",
+                            "sheet_id": sheet["sheet_id"],
+                            "project_id": project["project_id"],
+                            "job_id": "job-1",
+                            "source_pdf": "paper.pdf",
+                            "extracted_at": "2026-06-19T00:00:00Z",
+                            "model": "gpt-5.4-nano",
+                            "parse_status": "parsed",
+                            "parse_error": "",
+                            "cells": {"SpeciesLatinArticle": "Ailuropoda melanoleuca"},
+                        }
+                    ],
+                    [],
+                )
+
+                export_path = structured_extraction.export_structured_workbook(str(project["project_id"]))
+                workbook = load_workbook(export_path)
+                self.assertIn("Species characteristics", workbook.sheetnames)
+                worksheet = workbook["Species characteristics"]
+                headers = [worksheet.cell(row=1, column=index).value for index in range(1, 9)]
+                self.assertEqual(
+                    headers,
+                    [
+                        "source_pdf",
+                        "job_id",
+                        "extracted_at",
+                        "model",
+                        "parse_status",
+                        "parse_date",
+                        "parse_error",
+                        "SpeciesLatinArticle",
+                    ],
+                )
+                self.assertEqual(worksheet.cell(row=2, column=1).value, "paper.pdf")
+                self.assertEqual(worksheet.cell(row=2, column=8).value, "Ailuropoda melanoleuca")
+        finally:
+            config.PROJECTS_DIR = original_projects_dir
+
+    def test_structured_rows_include_live_job_placeholders(self) -> None:
+        from app.models import JobSettings
+        from app.services import jobs, projects, structured_extraction
+
+        original_projects_dir = config.PROJECTS_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config.PROJECTS_DIR = Path(tmpdir) / "projects"
+                config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+                project = projects.create_project("Structured Live Rows", "", "pdf_structured")
+                sheet = structured_extraction.create_sheet(
+                    project_id=str(project["project_id"]),
+                    name="Species characteristics",
+                    columns=[{"column_name": "SpeciesLatinArticle", "question": "State the scientific name.", "rules": ""}],
+                )
+                root = jobs.create_job("live-job", "live.pdf", JobSettings(), project_id=str(project["project_id"]))
+                jobs.update_metadata(
+                    root,
+                    extraction_type="pdf_structured",
+                    structured_sheet_id=sheet["sheet_id"],
+                    rq_screening_model="gpt-5.4-nano",
+                    source_relative_path="Pilots/live.pdf",
+                )
+
+                payload = structured_extraction.list_rows(
+                    project_id=str(project["project_id"]),
+                    sheet_id=str(sheet["sheet_id"]),
+                )
+                self.assertEqual(payload["total"], 1)
+                self.assertEqual(payload["items"][0]["source_pdf"], "live.pdf")
+                self.assertEqual(payload["items"][0]["parse_status"], "queued")
+                self.assertEqual(payload["items"][0]["parse_date"], "")
+
+                jobs.update_metadata(root, completed_at="2026-06-22T14:30:00Z", structured_parse_status="parsed")
+                jobs.update_status(
+                    "live-job",
+                    status="complete",
+                    stage="complete",
+                    message="Done",
+                    progress=1,
+                    project_id=str(project["project_id"]),
+                )
+                updated = structured_extraction.list_rows(
+                    project_id=str(project["project_id"]),
+                    sheet_id=str(sheet["sheet_id"]),
+                )
+                self.assertEqual(updated["items"][0]["parse_status"], "parsed")
+                self.assertEqual(updated["items"][0]["parse_date"], "2026-06-22T14:30:00Z")
+        finally:
+            config.PROJECTS_DIR = original_projects_dir
+
+    def test_structured_sheet_locks_and_duplicates_without_rows(self) -> None:
+        from app.services import projects, structured_extraction
+
+        original_projects_dir = config.PROJECTS_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config.PROJECTS_DIR = Path(tmpdir) / "projects"
+                config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+                project = projects.create_project("Structured Lock", "", "pdf_structured")
+                sheet = structured_extraction.create_sheet(
+                    project_id=str(project["project_id"]),
+                    name="Species characteristics",
+                    context="Original context.",
+                    row_unit="One row per species.",
+                    columns=[{"column_name": "SpeciesLatinArticle", "question": "State the scientific name.", "rules": ""}],
+                )
+                structured_extraction.replace_job_sheet_records(
+                    str(project["project_id"]),
+                    str(sheet["sheet_id"]),
+                    "job-1",
+                    [
+                        {
+                            "row_id": "row-1",
+                            "sheet_id": sheet["sheet_id"],
+                            "project_id": project["project_id"],
+                            "job_id": "job-1",
+                            "source_pdf": "paper.pdf",
+                            "extracted_at": "2026-06-19T00:00:00Z",
+                            "model": "gpt-5.4-nano",
+                            "parse_status": "parsed",
+                            "parse_error": "",
+                            "cells": {"SpeciesLatinArticle": "Ailuropoda melanoleuca"},
+                        }
+                    ],
+                    [],
+                )
+
+                locked = structured_extraction.lock_sheet_for_first_run(str(project["project_id"]), str(sheet["sheet_id"]), "job-1")
+                self.assertTrue(locked["is_locked"])
+                self.assertEqual(locked["locked_by_job_id"], "job-1")
+
+                with self.assertRaises(ValueError):
+                    structured_extraction.update_sheet(
+                        project_id=str(project["project_id"]),
+                        sheet_id=str(sheet["sheet_id"]),
+                        name="Edited",
+                        context="Changed",
+                        row_unit="Changed",
+                        columns=[{"column_name": "Changed", "question": "Changed?", "rules": ""}],
+                    )
+
+                duplicate = structured_extraction.duplicate_sheet(str(project["project_id"]), str(sheet["sheet_id"]))
+                self.assertFalse(duplicate["is_locked"])
+                self.assertEqual(duplicate["context"], "Original context.")
+                self.assertEqual(duplicate["columns"][0]["column_name"], "SpeciesLatinArticle")
+                original_rows = structured_extraction.list_rows(
+                    project_id=str(project["project_id"]),
+                    sheet_id=str(sheet["sheet_id"]),
+                )
+                duplicate_rows = structured_extraction.list_rows(
+                    project_id=str(project["project_id"]),
+                    sheet_id=str(duplicate["sheet_id"]),
+                )
+                self.assertEqual(original_rows["total"], 1)
+                self.assertEqual(duplicate_rows["total"], 0)
+        finally:
+            config.PROJECTS_DIR = original_projects_dir
+
+    def test_structured_pdf_page_and_api_are_project_type_scoped(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+        from app.services import projects
+
+        original_projects_dir = config.PROJECTS_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config.PROJECTS_DIR = Path(tmpdir) / "projects"
+                config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+                structured_project = projects.create_project("Structured Project", "", "pdf_structured")
+                pdf_project = projects.create_project("PDF Project", "", "pdf")
+                client = TestClient(app)
+
+                response = client.get(
+                    f"/structured-pdf?project_id={structured_project['project_id']}",
+                    follow_redirects=False,
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertIn("Workbook-style PDF extraction", response.text)
+
+                api_response = client.get(f"/api/structured/sheets?project_id={structured_project['project_id']}")
+                self.assertEqual(api_response.status_code, 200)
+                self.assertEqual(api_response.json()["sheets"], [])
+
+                wrong_type_response = client.get(
+                    f"/structured-pdf?project_id={pdf_project['project_id']}",
+                    follow_redirects=False,
+                )
+                self.assertEqual(wrong_type_response.status_code, 307)
+                self.assertIn("/rq-screening", wrong_type_response.headers["location"])
+        finally:
+            config.PROJECTS_DIR = original_projects_dir
+
+
 class BackendSmokeTests(unittest.TestCase):
     def test_key_get_endpoints_respond(self) -> None:
         original_jobs_dir = config.JOBS_DIR

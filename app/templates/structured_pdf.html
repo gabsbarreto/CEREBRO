@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Structured PDF Extraction | CEREBRO</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260620-structured-workbook" />
+  </head>
+  <body data-current-project-id="{{ current_project.project_id }}" data-current-project-name="{{ current_project.name }}" data-current-project-type="{{ current_project.extraction_type }}">
+    <div class="neural-backdrop" aria-hidden="true"></div>
+    <aside id="projectSidebar" class="project-sidebar collapsed" aria-label="Project navigation">
+      <button id="sidebarToggle" class="sidebar-toggle" type="button" aria-label="Toggle project sidebar" aria-expanded="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 7h16M4 12h16M4 17h16"></path>
+        </svg>
+      </button>
+      <div class="sidebar-content">
+        <a class="sidebar-brand" href="/?project_id={{ current_project.project_id }}">
+          <span class="sidebar-mark" aria-hidden="true"></span>
+          <span>CEREBRO</span>
+        </a>
+        <nav class="sidebar-nav" aria-label="Projects">
+          <div id="projectsNavItem" class="sidebar-nav-item">
+            <button id="projectsMenuButton" type="button" aria-expanded="false">
+              <span>Projects</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M9 6l6 6-6 6"></path>
+              </svg>
+            </button>
+            <div id="projectsFlyout" class="projects-flyout" role="menu">
+              {% for project in projects %}
+              <button
+                type="button"
+                class="project-choice {% if project.project_id == current_project.project_id %}active{% endif %}"
+                data-project-id="{{ project.project_id }}"
+                data-extraction-type="{{ project.extraction_type }}"
+                data-dashboard-path="{{ project.dashboard_path }}"
+                role="menuitem"
+              >
+                <strong>{{ project.name }}</strong>
+                <small>{{ project.extraction_type_label }}</small>
+              </button>
+              {% endfor %}
+            </div>
+          </div>
+          <a class="sidebar-link" href="/projects/new">New project</a>
+        </nav>
+      </div>
+    </aside>
+
+    <main class="shell structured-shell">
+      <header class="topbar hero-panel">
+        <div class="brand-lockup">
+          <div class="brand-mark" aria-hidden="true">
+            <span></span>
+          </div>
+          <div>
+            <p class="eyebrow">Workbook-style PDF extraction</p>
+            <h1>CEREBRO</h1>
+            <p class="tagline">Extract article PDFs into structured sheets.</p>
+          </div>
+        </div>
+        <div class="hero-status">
+          <div class="project-context">
+            <span>Current project</span>
+            <strong id="currentProjectName">{{ current_project.name }}</strong>
+          </div>
+          <span class="signal-chip">Structured PDF</span>
+          <span id="structuredQueueBadge" class="badge">No jobs</span>
+        </div>
+      </header>
+
+      <section class="workflow-strip structured-workflow-strip" aria-label="CEREBRO structured PDF workflow">
+        <div><span>01</span><strong>PDF intake</strong><small>Upload source files</small></div>
+        <div><span>02</span><strong>Spreadsheet</strong><small>Name table columns</small></div>
+        <div><span>03</span><strong>Structured sheet</strong><small>Questions and rules</small></div>
+        <div><span>04</span><strong>Export</strong><small>Excel worksheets</small></div>
+      </section>
+
+      <section class="panel intake-panel structured-run-panel">
+        <form id="structuredJobForm">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">PDF intake</p>
+              <h2>Upload and run structured extraction</h2>
+            </div>
+            <span class="panel-kicker">PDF to TSV rows</span>
+          </div>
+          <div class="grid">
+            <div class="file-picker upload-card">
+              <span class="file-picker-label">PDF files</span>
+              <strong>Single batch upload</strong>
+              <div class="file-picker-row">
+                <button id="chooseFilesButton" type="button">Choose files</button>
+                <span id="pdfInputSummary" class="file-picker-summary">No files selected</span>
+              </div>
+              <input id="pdfInput" class="visually-hidden-file" type="file" accept="application/pdf,.pdf" multiple />
+            </div>
+            <div class="file-picker upload-card">
+              <span class="file-picker-label">PDF folder</span>
+              <strong>Folder scan</strong>
+              <div class="file-picker-row">
+                <button id="chooseFolderButton" type="button">Choose folder</button>
+                <span id="folderInputSummary" class="file-picker-summary">No folder selected</span>
+              </div>
+              <input id="folderInput" class="visually-hidden-file" type="file" accept="application/pdf,.pdf" webkitdirectory directory multiple />
+            </div>
+
+            <div class="settings-card span-2">
+              <div class="subsection-title">
+                <span>Extraction route</span>
+              </div>
+              <div class="model-grid">
+                <label class="field model-field">
+                  <span>Model preset</span>
+                  <select id="modelPresetSelect" name="rq_model_preset">
+                    {% for preset in model_presets %}
+                    <option value="{{ preset.id }}" {% if defaults.rq_model_preset == preset.id %}selected{% endif %}>{{ preset.label }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <label id="openaiApiKeyField" class="field hidden">
+                  <span>OpenAI API key</span>
+                  <input name="openai_api_key" type="password" autocomplete="off" placeholder="Paste API key, use OPENAI_API_KEY, or data/api_key.txt" />
+                </label>
+              </div>
+              <div id="openaiInputModeField" class="pipeline-switch hidden">
+                <label class="inline-check pipeline-option">
+                  <input id="openaiInputFileCheckbox" type="checkbox" checked />
+                  <span>
+                    <strong>OpenAI file/source extraction</strong>
+                    <small>Attach each PDF as source material for table, figure, and layout-aware extraction.</small>
+                  </span>
+                </label>
+              </div>
+            </div>
+
+            <div class="settings-card span-2">
+              <div class="subsection-title">
+                <span>OCR settings</span>
+              </div>
+              <div class="model-grid">
+                <label class="field">
+                  <span>OCR DPI</span>
+                  <input name="ocr_dpi" type="number" min="72" max="400" value="{{ defaults.ocr_dpi }}" />
+                </label>
+                <label class="field">
+                  <span>OCR batch size</span>
+                  <input name="ocr_batch_size" type="number" min="1" max="8" value="{{ defaults.ocr_batch_size }}" />
+                </label>
+              </div>
+              <label class="field">
+                <span>DeepSeekOCR2 model path</span>
+                <input name="deepseek_ocr_model_path" type="text" placeholder="Auto-detects DeepSeek-OCR-2-8bit by default, or paste local path" />
+              </label>
+            </div>
+          </div>
+          <div class="form-footer">
+            <div id="structuredStatusLine" class="queue-hint">Complete the sheet schema, then upload PDFs.</div>
+            <button id="runStructuredButton" type="submit">Run structured extraction</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel structured-results-panel">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Workbook schema</p>
+            <h2>Spreadsheet</h2>
+            <p id="sheetFormStatus" class="section-subtitle">Name columns in the table, then fill the matching question and rules boxes.</p>
+          </div>
+          <div class="actions">
+            <button id="saveSheetButton" type="button">Save sheet</button>
+            <button id="duplicateSheetButton" type="button">Duplicate sheet</button>
+            <button id="deleteSheetButton" class="danger-button" type="button">Delete sheet</button>
+            <a id="structuredExportLink" class="button" href="/api/structured/export">Export workbook</a>
+          </div>
+        </div>
+        <p id="sheetLockNotice" class="sheet-lock-notice hidden">This sheet schema is locked for reproducibility because extraction has been queued or run. Duplicate it to edit the schema.</p>
+
+        <div class="workbook-tabs-bar" aria-label="Workbook sheets">
+          <div id="sheetTabs" class="workbook-tabs" role="tablist"></div>
+          <button id="addSheetButton" class="icon-button workbook-add-sheet" type="button" aria-label="Add sheet" title="Add sheet">
+            <span aria-hidden="true">+</span>
+          </button>
+        </div>
+
+        <form id="sheetForm" class="sheet-form workbook-sheet-form">
+          <label class="field sheet-name-field">
+            <span>Sheet name</span>
+            <input id="sheetNameInput" type="text" required maxlength="120" placeholder="Species characteristics" />
+          </label>
+          <div class="structured-sheet-inputs">
+            <label class="field">
+              <span>Context</span>
+              <textarea id="sheetContextInput" rows="4" placeholder="General extraction context for this worksheet."></textarea>
+            </label>
+            <label class="field">
+              <span>More information / other preferences</span>
+              <textarea id="sheetRowUnitInput" rows="4" placeholder="Any preferences about eligible rows, naming, units, missing values, or study-specific instructions."></textarea>
+            </label>
+          </div>
+        </form>
+
+        <div class="section-head compact structured-spreadsheet-head">
+          <div>
+            <p class="eyebrow">Structured rows</p>
+            <h3>Workbook grid</h3>
+            <p id="structuredRowsSummary" class="section-subtitle">No sheet selected.</p>
+          </div>
+          <span class="status-dot" aria-hidden="true"></span>
+        </div>
+        <div class="queue-filter-panel structured-filter-panel">
+          <div class="job-search-field">
+            <label class="visually-hidden" for="structuredSearchInput">Search structured rows</label>
+            <input id="structuredSearchInput" type="search" placeholder="Search rows, PDFs, errors..." autocomplete="off" />
+            <button id="clearStructuredSearchButton" class="search-clear-button" type="button" aria-label="Clear search" title="Clear search">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M6 6l12 12M18 6L6 18"></path>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div class="structured-table-shell">
+          <div id="structuredTableHeader" class="structured-table-header structured-table-grid"></div>
+          <div id="structuredTableViewport" class="structured-table-viewport" tabindex="0">
+            <div id="structuredVirtualSpacer" class="structured-virtual-spacer"></div>
+            <div id="structuredVirtualRows" class="structured-virtual-rows"></div>
+          </div>
+          <button id="addColumnDivider" class="excel-add-column-divider" type="button" aria-label="Add column at active boundary" title="Add column">
+            <span aria-hidden="true">+</span>
+          </button>
+        </div>
+
+        <div class="column-editor-head structured-column-instructions-head">
+          <div>
+            <p class="eyebrow">Column instructions</p>
+            <h3>Questions and rules</h3>
+          </div>
+          <div class="actions">
+            <button id="pasteColumnsButton" type="button">Paste sheet / columns</button>
+            <button id="addColumnButton" type="button">+ Column</button>
+          </div>
+        </div>
+        <div id="columnEditorList" class="column-editor-list"></div>
+
+        <details class="prompt-preview-panel">
+          <summary>Generated prompt preview</summary>
+          <pre id="compiledPromptPreview"></pre>
+        </details>
+      </section>
+
+      <section class="panel structured-errors-panel">
+        <div class="section-head compact">
+          <div>
+            <p class="eyebrow">Diagnostics</p>
+            <h2>Jobs and parse errors</h2>
+          </div>
+          <button id="refreshStructuredButton" type="button">Refresh</button>
+        </div>
+        <div id="structuredJobsList" class="structured-jobs-list"></div>
+      </section>
+    </main>
+
+    <div id="pasteColumnsModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="pasteColumnsTitle">
+      <div class="modal-panel structured-paste-modal">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Sheet import parser</p>
+            <h2 id="pasteColumnsTitle">Paste sheet / columns</h2>
+          </div>
+          <button id="closePasteColumnsButton" class="icon-button" type="button" aria-label="Close column paste" title="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M6 6l12 12M18 6L6 18"></path>
+            </svg>
+          </button>
+        </div>
+        <label class="field">
+          <span>Sheet or column blocks</span>
+          <textarea id="pasteColumnsInput" rows="18" spellcheck="false" placeholder="Sheet name ### Species characteristics&#10;&#10;Context ###&#10;General context for this worksheet.&#10;&#10;More information / other preferences ###&#10;One row per eligible species.&#10;&#10;Columns ###&#10;&#10;Column name ### SpeciesLatinArticle&#10;&#10;Question ### ...&#10;&#10;Rules ###&#10;&#10;* ...&#10;&#10;---&#10;&#10;Column name ### SpeciesCommonArticle"></textarea>
+        </label>
+        <p id="pasteColumnsStatus" class="prompt-status"></p>
+        <div class="form-footer">
+          <div class="queue-hint">Imports update the current sheet draft and autosave after review.</div>
+          <button id="parseColumnsButton" type="button">Import sheet / columns</button>
+        </div>
+      </div>
+    </div>
+
+    <input id="currentProjectId" type="hidden" value="{{ current_project.project_id }}" />
+    <script id="projectData" type="application/json">{{ projects | tojson }}</script>
+    <script id="modelPresetData" type="application/json">{{ model_presets | tojson }}</script>
+    <script src="/static/structured_pdf.js?v=20260620-structured-workbook"></script>
+  </body>
+</html>

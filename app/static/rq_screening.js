@@ -327,8 +327,21 @@ function renderProjectChoices(projects) {
     .map((project) => {
       const projectId = project.project_id || "";
       const active = projectId === currentProjectId ? "active" : "";
-      const label = project.extraction_type_label || (project.extraction_type === "text" ? "Text extraction" : "PDF extraction");
-      const dashboardPath = project.dashboard_path || (project.extraction_type === "text" ? `/text?project_id=${encodeURIComponent(projectId)}` : `/?project_id=${encodeURIComponent(projectId)}`);
+      const extractionType = project.extraction_type || "pdf";
+      const label =
+        project.extraction_type_label ||
+        (extractionType === "text"
+          ? "Text extraction"
+          : extractionType === "pdf_structured"
+            ? "Structured PDF extraction"
+            : "PDF extraction");
+      const dashboardPath =
+        project.dashboard_path ||
+        (extractionType === "text"
+          ? `/text?project_id=${encodeURIComponent(projectId)}`
+          : extractionType === "pdf_structured"
+            ? `/structured-pdf?project_id=${encodeURIComponent(projectId)}`
+            : `/rq-screening?project_id=${encodeURIComponent(projectId)}`);
       return `
         <button type="button" class="project-choice ${active}" data-project-id="${escapeHtml(projectId)}" data-dashboard-path="${escapeHtml(dashboardPath)}" role="menuitem">
           <strong>${escapeHtml(project.name || projectId)}</strong>

@@ -1943,6 +1943,517 @@ button:disabled {
   margin-bottom: 14px;
 }
 
+.structured-shell .hero-panel {
+  border-color: rgb(139 124 255 / 0.34);
+}
+
+.structured-workflow-strip div {
+  border-color: rgb(139 124 255 / 0.28);
+}
+
+.structured-sheet-toolbar {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 14px;
+}
+
+.workbook-tabs-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  min-width: 0;
+  margin-bottom: 14px;
+  border-bottom: 1px solid rgb(59 86 119 / 0.74);
+}
+
+.workbook-tabs {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+.sheet-tab {
+  min-height: 36px;
+  max-width: 220px;
+  border-color: rgb(59 86 119 / 0.76);
+  border-bottom-color: transparent;
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: rgb(10 18 31 / 0.9);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sheet-tab.active {
+  position: relative;
+  z-index: 1;
+  border-color: rgb(139 124 255 / 0.54);
+  border-bottom-color: rgb(12 20 34 / 0.98);
+  background: linear-gradient(180deg, rgb(30 38 65 / 0.98), rgb(12 20 34 / 0.98));
+  color: var(--ink);
+}
+
+.workbook-add-sheet {
+  width: 36px;
+  height: 36px;
+  min-height: 36px;
+  margin-bottom: 0;
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+
+.workbook-add-sheet span {
+  font-size: 24px;
+  line-height: 1;
+}
+
+#saveSheetButton.queued {
+  border-color: rgb(245 191 79 / 0.5);
+  color: #ffe3a4;
+}
+
+.workbook-sheet-form {
+  margin-bottom: 14px;
+}
+
+.sheet-lock-notice {
+  margin: -4px 0 14px;
+  padding: 10px 12px;
+  border: 1px solid rgb(245 191 79 / 0.42);
+  border-radius: var(--radius);
+  background: rgb(245 191 79 / 0.08);
+  color: #ffe3a4;
+}
+
+.sheet-name-field {
+  max-width: 360px;
+}
+
+.structured-sheet-inputs {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.structured-sheet-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 0.6fr);
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.structured-sheet-summary > div {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgb(59 86 119 / 0.7);
+  border-radius: var(--radius);
+  background: rgb(6 12 23 / 0.54);
+}
+
+.structured-sheet-summary p:last-child {
+  margin: 5px 0 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.prompt-preview-panel pre {
+  max-height: 360px;
+  font-size: 12px;
+}
+
+.modal-panel {
+  width: min(760px, 100%);
+  max-height: 90vh;
+  overflow: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, rgb(19 30 48 / 0.98), rgb(9 16 29 / 0.98));
+  padding: 18px;
+  box-shadow: var(--shadow);
+}
+
+.modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.modal-head h2 {
+  margin: 3px 0 0;
+  font-size: 21px;
+}
+
+.structured-sheet-modal {
+  width: min(980px, 100%);
+}
+
+.structured-paste-modal,
+.structured-result-modal {
+  width: min(940px, 100%);
+}
+
+.sheet-form,
+.column-editor-list,
+.structured-result-stack {
+  display: grid;
+  gap: 12px;
+}
+
+.import-conflict-list {
+  margin: 10px 0 16px;
+  padding-left: 20px;
+  color: var(--ink);
+}
+
+.column-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.column-editor-head h3 {
+  margin: 3px 0 0;
+  font-size: 17px;
+}
+
+.structured-column-row {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgb(59 86 119 / 0.72);
+  border-radius: var(--radius);
+  background: rgb(6 12 23 / 0.52);
+}
+
+.structured-column-row.incomplete {
+  border-color: rgb(245 191 79 / 0.42);
+  background: linear-gradient(180deg, rgb(245 191 79 / 0.08), rgb(6 12 23 / 0.52));
+}
+
+.field em {
+  color: var(--warning);
+  font-style: normal;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.column-row-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.remove-column-button {
+  color: var(--danger);
+  border-color: rgb(255 107 122 / 0.38);
+}
+
+.remove-column-button path,
+.modal-head .icon-button path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.structured-filter-panel {
+  margin-bottom: 12px;
+}
+
+.structured-spreadsheet-head {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.structured-column-instructions-head {
+  margin-top: 16px;
+}
+
+.structured-table-shell {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid #b7b7b7;
+  border-radius: 0;
+  background: #fff;
+  box-shadow: inset 0 1px 0 #f8f8f8;
+}
+
+.structured-table-grid {
+  display: grid;
+  gap: 0;
+  align-items: stretch;
+}
+
+.structured-table-header {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  min-width: 980px;
+  padding: 0;
+  border-bottom: 0;
+  background: #fff;
+  color: #222;
+  font-size: 12px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.structured-header-fixed {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.structured-header-cell {
+  min-width: 0;
+  display: block;
+  padding: 0;
+}
+
+.structured-column-name-input {
+  width: 100%;
+  min-height: 31px;
+  height: 31px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 0;
+  background: #fff;
+  color: #111;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.structured-column-name-input:focus {
+  position: relative;
+  z-index: 2;
+  box-shadow: inset 0 0 0 2px #217346;
+}
+
+.excel-add-column-divider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 6;
+  width: 18px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transform: none;
+}
+
+.excel-add-column-divider.hidden {
+  display: none;
+}
+
+.excel-add-column-divider::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 8px;
+  width: 2px;
+  background: #1a73e8;
+}
+
+.excel-add-column-divider span {
+  position: absolute;
+  top: 4px;
+  left: 50%;
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 50%;
+  background: #1a73e8;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.25);
+  color: #fff;
+  font-size: 15px;
+  line-height: 1;
+  transform: translateX(-50%);
+}
+
+.excel-add-column-divider:hover,
+.excel-add-column-divider:focus-visible {
+  opacity: 1;
+  transform: none;
+}
+
+.structured-excel-row {
+  display: grid;
+  min-width: 980px;
+}
+
+.structured-excel-letters {
+  height: 24px;
+}
+
+.structured-excel-header-row {
+  height: 32px;
+}
+
+.excel-corner-cell,
+.excel-column-letter,
+.excel-row-number {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  border-right: 1px solid #d9d9d9;
+  border-bottom: 1px solid #d9d9d9;
+  background: #f3f3f3;
+  color: #444;
+  font-size: 12px;
+  font-weight: 400;
+  user-select: none;
+}
+
+.excel-corner-cell {
+  background: #ebebeb;
+}
+
+.excel-column-letter.inactive-excel-column {
+  background: #ececec;
+  color: #999;
+}
+
+.excel-cell {
+  display: block;
+  min-width: 0;
+  min-height: 32px;
+  padding: 6px 7px;
+  overflow: hidden;
+  border-right: 1px solid #d9d9d9;
+  border-bottom: 1px solid #d9d9d9;
+  background: #fff;
+  color: #111;
+  font-size: 12px;
+  line-height: 19px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inactive-excel-cell {
+  background: #f4f4f4;
+  color: transparent;
+}
+
+.structured-table-viewport {
+  position: relative;
+  height: min(70vh, 640px);
+  min-height: 420px;
+  overflow: auto;
+  outline: none;
+  background: #fff;
+}
+
+.structured-virtual-spacer {
+  position: relative;
+  width: 980px;
+  min-width: 100%;
+}
+
+.structured-virtual-rows {
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 980px;
+  min-width: 100%;
+}
+
+.structured-table-row {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  height: 32px;
+  padding: 0;
+  border-bottom: 0;
+  background: #fff;
+  font-size: 12px;
+}
+
+.structured-table-row.running {
+  background: #fff;
+}
+
+.structured-table-row.complete {
+  background: #fff;
+}
+
+.structured-table-row.failed {
+  background: #fff;
+}
+
+.structured-table-row.blank .excel-cell {
+  color: transparent;
+}
+
+.structured-table-row .status-badge {
+  min-height: 20px;
+  padding: 2px 6px;
+  border-radius: 2px;
+  font-size: 11px;
+}
+
+.structured-jobs-list {
+  display: grid;
+  gap: 10px;
+}
+
+.structured-job-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid rgb(59 86 119 / 0.72);
+  border-radius: var(--radius);
+  background: rgb(6 12 23 / 0.52);
+}
+
+.structured-job-card strong,
+.structured-job-card span,
+.structured-job-card small {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.structured-job-card span,
+.structured-job-card small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.structured-job-card.complete {
+  border-color: rgb(52 227 189 / 0.34);
+}
+
+.structured-job-card.running {
+  border-color: rgb(55 215 255 / 0.34);
+}
+
+.structured-job-card.failed {
+  border-color: rgb(255 107 122 / 0.42);
+}
+
 .prompt-choice:hover {
   background: rgb(55 215 255 / 0.1);
 }
@@ -2083,12 +2594,28 @@ pre {
     grid-template-columns: 1fr;
   }
 
+  .structured-sheet-inputs,
+  .structured-sheet-summary,
+  .structured-sheet-toolbar {
+    grid-template-columns: 1fr;
+  }
+
   .remove-mapping-button {
     width: 100%;
   }
 
   .queue-row-actions {
     grid-column: 1 / -1;
+  }
+
+  .structured-job-card,
+  .column-row-head {
+    grid-template-columns: 1fr;
+  }
+
+  .workbook-tabs-bar {
+    align-items: stretch;
+    flex-wrap: wrap;
   }
 }
 
