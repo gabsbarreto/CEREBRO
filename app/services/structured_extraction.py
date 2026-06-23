@@ -584,27 +584,36 @@ def export_structured_workbook(project_id: str) -> Path:
     for sheet in sheets:
         worksheet = workbook.create_sheet(safe_worksheet_name(str(sheet.get("name") or "Sheet"), used_names))
         columns = [column["column_name"] for column in normalize_columns(sheet.get("columns") or [], require_questions=False)]
-        headers = ["source_pdf", "job_id", "extracted_at", "model", "parse_status", "parse_date", "parse_error"] + columns
+        headers = [
+            excel_safe_text(header)
+            for header in ["source_pdf", "job_id", "extracted_at", "model", "parse_status", "parse_date", "parse_error"] + columns
+        ]
         worksheet.append(headers)
         for record in read_sheet_rows(project_id, str(sheet["sheet_id"])) + read_sheet_errors(project_id, str(sheet["sheet_id"])):
             cells = record.get("cells") if isinstance(record.get("cells"), dict) else {}
             worksheet.append(
                 [
-                    str(record.get("source_pdf") or ""),
-                    str(record.get("job_id") or ""),
-                    str(record.get("extracted_at") or ""),
-                    str(record.get("model") or ""),
-                    str(record.get("parse_status") or ""),
-                    str(record.get("parse_date") or record.get("extracted_at") or ""),
-                    str(record.get("parse_error") or ""),
+                    excel_safe_text(record.get("source_pdf")),
+                    excel_safe_text(record.get("job_id")),
+                    excel_safe_text(record.get("extracted_at")),
+                    excel_safe_text(record.get("model")),
+                    excel_safe_text(record.get("parse_status")),
+                    excel_safe_text(record.get("parse_date") or record.get("extracted_at")),
+                    excel_safe_text(record.get("parse_error")),
                 ]
-                + [str(cells.get(column) or "") for column in columns]
+                + [excel_safe_text(cells.get(column)) for column in columns]
             )
         for column in worksheet.columns:
             letter = column[0].column_letter
             worksheet.column_dimensions[letter].width = min(max(len(str(column[0].value or "")) + 4, 14), 60)
     path = projects.project_root(project_id) / f"cerebro_{projects.sanitize_slug(str(project.get('name') or project_id))}_{STRUCTURED_EXPORT_SUFFIX}"
-    workbook.save(path)
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    try:
+        workbook.save(tmp_path)
+        tmp_path.replace(path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
     return path
 
 
@@ -892,7 +901,7 @@ def row_search_haystack(record: dict[str, Any]) -> str:
 
 
 def safe_worksheet_name(name: str, used_names: set[str]) -> str:
-    cleaned = re.sub(r"[\[\]:*?/\\]", " ", str(name or "Sheet")).strip() or "Sheet"
+    cleaned = re.sub(r"[\[\]:*?/\\]", " ", excel_safe_text(name or "Sheet")).strip() or "Sheet"
     base = cleaned[:31] or "Sheet"
     candidate = base
     suffix = 1
@@ -902,6 +911,22 @@ def safe_worksheet_name(name: str, used_names: set[str]) -> str:
         suffix += 1
     used_names.add(candidate)
     return candidate
+
+
+def excel_safe_text(value: Any) -> str:
+    """Strip characters that are legal in JSON/text files but invalid in XLSX XML."""
+    text = "" if value is None else str(value)
+    return "".join(character for character in text if is_xml_compatible_character(character))
+
+
+def is_xml_compatible_character(character: str) -> bool:
+    codepoint = ord(character)
+    return (
+        codepoint in {0x09, 0x0A, 0x0D}
+        or 0x20 <= codepoint <= 0xD7FF
+        or 0xE000 <= codepoint <= 0xFFFD
+        or 0x10000 <= codepoint <= 0x10FFFF
+    )
 
 
 def read_text_if_exists(path: Path) -> str:
