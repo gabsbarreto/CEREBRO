@@ -45,7 +45,9 @@ def list_sheets(project_id: str) -> list[dict[str, Any]]:
             sheets.append(read_sheet_file(path))
         except Exception:
             continue
-    sheets.sort(key=lambda item: str(item.get("name") or "").lower())
+    ensure_sheet_orders(project_id, sheets)
+    ensure_unique_sheet_names(project_id, sheets)
+    sheets.sort(key=sheet_sort_key)
     return sheets
 
 
@@ -66,6 +68,7 @@ def create_sheet(
         row_unit=row_unit,
         columns=columns or [],
         created_at=utc_now(),
+        sheet_order=next_sheet_order(project_id),
     )
     root = sheet_root(project_id, str(payload["sheet_id"]))
     root.mkdir(parents=True, exist_ok=True)
@@ -93,6 +96,7 @@ def update_sheet(
         row_unit=row_unit,
         columns=columns or [],
         created_at=str(existing.get("created_at") or utc_now()),
+        sheet_order=sheet_order(existing),
     )
     jobs.write_json(sheet_root(project_id, sheet_id) / SHEET_FILENAME, payload)
     return read_sheet_file(sheet_root(project_id, sheet_id) / SHEET_FILENAME)
@@ -100,9 +104,13 @@ def update_sheet(
 
 def duplicate_sheet(project_id: str, sheet_id: str) -> dict[str, Any]:
     existing = get_sheet(project_id, sheet_id)
-    duplicate = create_sheet(
+    duplicate_order = sheet_order(existing) + 1
+    shift_sheet_orders(project_id, start_order=duplicate_order)
+    duplicate_name = unique_duplicate_sheet_name(project_id, str(existing.get("name") or "Sheet"))
+    payload = normalized_sheet_payload(
         project_id=project_id,
-        name=unique_duplicate_sheet_name(project_id, str(existing.get("name") or "Sheet")),
+        sheet_id=unique_sheet_id(project_id, duplicate_name),
+        name=duplicate_name,
         context=str(existing.get("context") or ""),
         row_unit=str(existing.get("row_unit") or ""),
         columns=[
@@ -113,8 +121,14 @@ def duplicate_sheet(project_id: str, sheet_id: str) -> dict[str, Any]:
             }
             for column in existing.get("columns") or []
         ],
+        created_at=utc_now(),
+        sheet_order=duplicate_order,
     )
-    return duplicate
+    root = sheet_root(project_id, str(payload["sheet_id"]))
+    root.mkdir(parents=True, exist_ok=True)
+    jobs.write_json(root / SHEET_FILENAME, payload)
+    ensure_sheet_data_files(root)
+    return read_sheet_file(root / SHEET_FILENAME)
 
 
 def delete_sheet(project_id: str, sheet_id: str) -> None:
@@ -652,13 +666,93 @@ def unique_sheet_id(project_id: str, name: str) -> str:
 
 def unique_duplicate_sheet_name(project_id: str, name: str) -> str:
     existing = {str(sheet.get("name") or "") for sheet in list_sheets(project_id)}
-    base = f"{str(name or 'Sheet').strip() or 'Sheet'} copy"
-    if base not in existing:
-        return base
-    index = 2
-    while f"{base} {index}" in existing:
+    base = duplicate_base_name(name)
+    return next_duplicate_name(base, existing)
+
+
+def duplicate_base_name(name: str) -> str:
+    return re.sub(r"\s+\(\d+\)$", "", str(name or "Sheet").strip() or "Sheet").strip() or "Sheet"
+
+
+def next_duplicate_name(base: str, existing: set[str]) -> str:
+    clean_base = str(base or "Sheet").strip() or "Sheet"
+    index = 1
+    while f"{clean_base} ({index})" in existing:
         index += 1
-    return f"{base} {index}"
+    return f"{clean_base} ({index})"
+
+
+def sheet_sort_key(sheet: dict[str, Any]) -> tuple[int, str, str]:
+    return (sheet_order(sheet), str(sheet.get("created_at") or ""), str(sheet.get("sheet_id") or ""))
+
+
+def sheet_order(sheet: dict[str, Any]) -> int:
+    try:
+        return int(sheet.get("sheet_order"))
+    except (TypeError, ValueError):
+        return 1_000_000
+
+
+def ensure_sheet_orders(project_id: str, sheets: list[dict[str, Any]]) -> None:
+    if not any(sheet_order(sheet) >= 1_000_000 for sheet in sheets):
+        return
+    ordered = sorted(sheets, key=lambda sheet: (str(sheet.get("created_at") or ""), str(sheet.get("sheet_id") or "")))
+    for index, sheet in enumerate(ordered):
+        if sheet_order(sheet) == index:
+            continue
+        sheet["sheet_order"] = index
+        jobs.write_json(sheet_root(project_id, str(sheet["sheet_id"])) / SHEET_FILENAME, serialized_sheet_payload(sheet))
+
+
+def ensure_unique_sheet_names(project_id: str, sheets: list[dict[str, Any]]) -> None:
+    used_names: set[str] = set()
+    for sheet in sorted(sheets, key=sheet_sort_key):
+        name = str(sheet.get("name") or "Sheet").strip() or "Sheet"
+        if name not in used_names:
+            if sheet.get("name") != name:
+                sheet["name"] = name
+                jobs.write_json(sheet_root(project_id, str(sheet["sheet_id"])) / SHEET_FILENAME, serialized_sheet_payload(sheet))
+            used_names.add(name)
+            continue
+        base = duplicate_base_name(name)
+        candidate = next_duplicate_name(base, used_names)
+        sheet["name"] = candidate
+        used_names.add(candidate)
+        jobs.write_json(sheet_root(project_id, str(sheet["sheet_id"])) / SHEET_FILENAME, serialized_sheet_payload(sheet))
+
+
+def next_sheet_order(project_id: str) -> int:
+    orders = [sheet_order(sheet) for sheet in list_sheets(project_id)]
+    real_orders = [order for order in orders if order < 1_000_000]
+    if real_orders:
+        return max(real_orders) + 1
+    return len(orders)
+
+
+def shift_sheet_orders(project_id: str, *, start_order: int) -> None:
+    for sheet in reversed(list_sheets(project_id)):
+        order = sheet_order(sheet)
+        if order >= start_order:
+            sheet["sheet_order"] = order + 1
+            jobs.write_json(sheet_root(project_id, str(sheet["sheet_id"])) / SHEET_FILENAME, serialized_sheet_payload(sheet))
+
+
+def serialized_sheet_payload(sheet: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "sheet_id": validate_sheet_id(str(sheet.get("sheet_id") or "")),
+        "project_id": projects.validate_project_id(str(sheet.get("project_id") or "")),
+        "name": str(sheet.get("name") or "Sheet"),
+        "context": str(sheet.get("context") or ""),
+        "row_unit": str(sheet.get("row_unit") or ""),
+        "columns": normalize_columns(sheet.get("columns") or [], require_questions=False),
+        "sheet_order": sheet_order(sheet),
+        "created_at": str(sheet.get("created_at") or ""),
+        "updated_at": str(sheet.get("updated_at") or ""),
+        "locked_at": str(sheet.get("locked_at") or ""),
+        "locked_by_job_id": str(sheet.get("locked_by_job_id") or ""),
+        "locked_reason": str(sheet.get("locked_reason") or ""),
+    }
+    return payload
 
 
 def normalized_sheet_payload(
@@ -670,6 +764,7 @@ def normalized_sheet_payload(
     row_unit: str,
     columns: list[dict[str, str]],
     created_at: str,
+    sheet_order: int,
 ) -> dict[str, Any]:
     clean_name = str(name or "").strip()
     if not clean_name:
@@ -683,6 +778,7 @@ def normalized_sheet_payload(
         "context": str(context or "").strip(),
         "row_unit": str(row_unit or "").strip(),
         "columns": clean_columns,
+        "sheet_order": int(sheet_order),
         "created_at": created_at or now,
         "updated_at": now,
         "locked_at": "",
@@ -720,6 +816,7 @@ def read_sheet_file(path: Path) -> dict[str, Any]:
     payload["columns"] = normalize_columns(payload.get("columns") or [], require_questions=False)
     payload.setdefault("context", "")
     payload.setdefault("row_unit", "")
+    payload.setdefault("sheet_order", 1_000_000)
     payload.setdefault("created_at", "")
     payload.setdefault("updated_at", "")
     payload.setdefault("locked_at", "")

@@ -1025,6 +1025,58 @@ Rules ###
         finally:
             config.PROJECTS_DIR = original_projects_dir
 
+    def test_structured_sheets_keep_creation_order_and_duplicate_next_to_source(self) -> None:
+        from app.services import projects, structured_extraction
+
+        original_projects_dir = config.PROJECTS_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config.PROJECTS_DIR = Path(tmpdir) / "projects"
+                config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+                project = projects.create_project("Structured order", "", "pdf_structured")
+                first = structured_extraction.create_sheet(
+                    project_id=str(project["project_id"]),
+                    name="Zeta",
+                    columns=[{"column_name": "Column1", "question": "", "rules": ""}],
+                )
+                second = structured_extraction.create_sheet(
+                    project_id=str(project["project_id"]),
+                    name="Alpha",
+                    columns=[{"column_name": "Column1", "question": "", "rules": ""}],
+                )
+                structured_extraction.create_sheet(
+                    project_id=str(project["project_id"]),
+                    name="Middle",
+                    columns=[{"column_name": "Column1", "question": "", "rules": ""}],
+                )
+                structured_extraction.create_sheet(
+                    project_id=str(project["project_id"]),
+                    name="Zeta",
+                    columns=[{"column_name": "Column1", "question": "", "rules": ""}],
+                )
+
+                self.assertEqual(
+                    [sheet["name"] for sheet in structured_extraction.list_sheets(str(project["project_id"]))],
+                    ["Zeta", "Alpha", "Middle", "Zeta (1)"],
+                )
+
+                duplicate = structured_extraction.duplicate_sheet(str(project["project_id"]), str(second["sheet_id"]))
+                self.assertEqual(duplicate["name"], "Alpha (1)")
+                self.assertEqual(
+                    [sheet["name"] for sheet in structured_extraction.list_sheets(str(project["project_id"]))],
+                    ["Zeta", "Alpha", "Alpha (1)", "Middle", "Zeta (1)"],
+                )
+
+                duplicate_again = structured_extraction.duplicate_sheet(str(project["project_id"]), str(duplicate["sheet_id"]))
+                self.assertEqual(duplicate_again["name"], "Alpha (2)")
+                self.assertEqual(
+                    [sheet["name"] for sheet in structured_extraction.list_sheets(str(project["project_id"]))],
+                    ["Zeta", "Alpha", "Alpha (1)", "Alpha (2)", "Middle", "Zeta (1)"],
+                )
+                self.assertEqual(first["name"], "Zeta")
+        finally:
+            config.PROJECTS_DIR = original_projects_dir
+
     def test_structured_sheet_locks_and_duplicates_without_rows(self) -> None:
         from app.services import projects, structured_extraction
 

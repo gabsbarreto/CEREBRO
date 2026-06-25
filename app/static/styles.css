@@ -1960,10 +1960,13 @@ button:disabled {
 }
 
 .workbook-tabs-bar {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   align-items: flex-end;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
   margin-bottom: 14px;
   border-bottom: 1px solid rgb(59 86 119 / 0.74);
 }
@@ -1973,20 +1976,22 @@ button:disabled {
   align-items: flex-end;
   gap: 4px;
   min-width: 0;
+  max-width: 100%;
   overflow-x: auto;
+  overflow-y: hidden;
+  scroll-behavior: smooth;
   scrollbar-color: var(--line-strong) transparent;
 }
 
 .sheet-tab {
+  flex: 0 0 auto;
   min-height: 36px;
-  max-width: 220px;
   border-color: rgb(59 86 119 / 0.76);
   border-bottom-color: transparent;
   border-radius: var(--radius) var(--radius) 0 0;
   background: rgb(10 18 31 / 0.9);
   color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow: visible;
   white-space: nowrap;
 }
 
@@ -2005,6 +2010,18 @@ button:disabled {
   min-height: 36px;
   margin-bottom: 0;
   border-radius: var(--radius) var(--radius) 0 0;
+}
+
+.workbook-tab-scroll {
+  width: 32px;
+  height: 36px;
+  min-height: 36px;
+  margin-bottom: 0;
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+
+.workbook-tab-scroll:disabled {
+  opacity: 0.38;
 }
 
 .workbook-add-sheet span {
@@ -2614,8 +2631,8 @@ pre {
   }
 
   .workbook-tabs-bar {
-    align-items: stretch;
-    flex-wrap: wrap;
+    align-items: flex-end;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
   }
 }
 

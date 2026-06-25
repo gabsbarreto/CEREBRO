@@ -7,6 +7,8 @@ const chooseFolderButton = document.querySelector("#chooseFolderButton");
 const pdfInputSummary = document.querySelector("#pdfInputSummary");
 const folderInputSummary = document.querySelector("#folderInputSummary");
 const sheetTabs = document.querySelector("#sheetTabs");
+const sheetTabsScrollLeft = document.querySelector("#sheetTabsScrollLeft");
+const sheetTabsScrollRight = document.querySelector("#sheetTabsScrollRight");
 const addSheetButton = document.querySelector("#addSheetButton");
 const saveSheetButton = document.querySelector("#saveSheetButton");
 const duplicateSheetButton = document.querySelector("#duplicateSheetButton");
@@ -99,6 +101,10 @@ modelPresetSelect.addEventListener("change", renderSelectedModelPreset);
 addSheetButton.addEventListener("click", async () => {
   await createWorkbookSheet();
 });
+sheetTabsScrollLeft?.addEventListener("click", () => scrollSheetTabs(-1));
+sheetTabsScrollRight?.addEventListener("click", () => scrollSheetTabs(1));
+sheetTabs?.addEventListener("scroll", updateSheetTabScrollControls);
+window.addEventListener("resize", updateSheetTabScrollControls);
 
 saveSheetButton.addEventListener("click", async () => {
   await saveActiveSheet({ silent: false, requireReady: false });
@@ -432,6 +438,28 @@ function renderSheetTabs() {
       await loadRows(0, { force: true });
     });
   });
+  requestAnimationFrame(() => {
+    sheetTabs.querySelector(".sheet-tab.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    updateSheetTabScrollControls();
+  });
+}
+
+function scrollSheetTabs(direction) {
+  if (!sheetTabs) return;
+  const distance = Math.max(180, Math.floor(sheetTabs.clientWidth * 0.75));
+  sheetTabs.scrollBy({ left: direction * distance, behavior: "smooth" });
+}
+
+function updateSheetTabScrollControls() {
+  if (!sheetTabs || !sheetTabsScrollLeft || !sheetTabsScrollRight) return;
+  const maxScroll = Math.max(0, sheetTabs.scrollWidth - sheetTabs.clientWidth);
+  const hasOverflow = maxScroll > 1;
+  const left = sheetTabs.scrollLeft > 1;
+  const right = sheetTabs.scrollLeft < maxScroll - 1;
+  sheetTabsScrollLeft.classList.toggle("hidden", !hasOverflow);
+  sheetTabsScrollRight.classList.toggle("hidden", !hasOverflow);
+  sheetTabsScrollLeft.disabled = !left;
+  sheetTabsScrollRight.disabled = !right;
 }
 
 function renderColumnCards() {
