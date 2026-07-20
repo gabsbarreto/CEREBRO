@@ -208,6 +208,8 @@ Important environment variables:
 
 The config module creates `data/`, `data/jobs/`, `data/projects/`, and `data/prompts/` on import.
 
+`MAX_OPENAI_CONCURRENT_REQUESTS` defaults to `15`. It controls the OpenAI inference queue and the text extraction worker pool unless overridden by the environment.
+
 ## 6. Models And Presets
 
 Main file: `app/models.py`.
@@ -222,8 +224,7 @@ Model presets currently include:
 - `qwen35_9b_8bit_reasoning`: public local MLX preset.
 - `qwen36_27b_instruct`: hidden local preset.
 - `openai_gpt5_mini_high`: public OpenAI GPT-5 mini preset with high reasoning.
-- `openai_gpt54_nano_xhigh`: public OpenAI GPT-5.4 nano preset with xhigh reasoning.
-- `openai_gpt54_mini_high`: hidden backward-compatible alias that actually routes to GPT-5.4 nano with xhigh reasoning.
+- `openai_gpt54_mini_high`: public OpenAI GPT-5.4 mini preset with high reasoning.
 
 Provider normalization:
 
@@ -353,10 +354,12 @@ Structured PDF extraction API:
 GET    /api/structured/sheets
 POST   /api/structured/sheets
 GET    /api/structured/sheets/{sheet_id}
+GET    /api/structured/sheets/{sheet_id}/import-text
 PUT    /api/structured/sheets/{sheet_id}
 DELETE /api/structured/sheets/{sheet_id}
 POST   /api/structured/sheets/parse-import
 POST   /api/structured/sheets/{sheet_id}/duplicate
+POST   /api/structured/workbook/duplicate
 POST   /api/structured/columns/parse-blocks
 POST   /api/structured/jobs
 GET    /api/structured/jobs
@@ -637,14 +640,16 @@ User flow:
 15. Draft sheets autosave after edits; extraction cannot run until the schema is complete.
 16. A sheet locks as soon as its first structured extraction job is queued. Locked sheets are read-only.
 17. Locked sheets can be duplicated to edit the copied schema. Duplication copies sheet name, context, preferences, and columns, but not rows, parse errors, jobs, or lock metadata.
-18. The backend compiles the sheet schema into strict TSV extraction instructions.
-19. User uploads one or more PDFs or a folder of PDFs.
-20. Backend creates one PDF job per uploaded file and stores the compiled structured prompt in the job metadata/output prompts.
-21. The existing PDF OCR/OpenAI pipeline runs as usual.
-22. Completion is intercepted for `extraction_type: "pdf_structured"` and parses the model response as TSV.
-23. Parsed rows are appended to the selected sheet's `rows.jsonl`; parse failures are appended to `errors.jsonl`.
-24. The UI shows rows in a fixed-height virtual table and exposes raw output/parse errors per job.
-25. Export creates one Excel worksheet per structured sheet.
+18. `Duplicate workbook` opens a sheet checklist and creates a new `pdf_structured` project containing only the selected sheet schemas in source order.
+19. Workbook copies preserve the project description and use the next available `Project name (n)` name. They do not copy PDFs, jobs, rows, errors, outputs, or sheet locks.
+20. The backend compiles the sheet schema into strict TSV extraction instructions.
+21. User uploads one or more PDFs or a folder of PDFs.
+22. Backend creates one PDF job per uploaded file and stores the compiled structured prompt in the job metadata/output prompts.
+23. The existing PDF OCR/OpenAI pipeline runs as usual.
+24. Completion is intercepted for `extraction_type: "pdf_structured"` and parses the model response as TSV.
+25. Parsed rows are appended to the selected sheet's `rows.jsonl`; parse failures are appended to `errors.jsonl`.
+26. The UI shows rows in a fixed-height virtual table and exposes raw output/parse errors per job.
+27. Export creates one Excel worksheet per structured sheet.
 
 Current structured PDF panel order:
 
@@ -655,9 +660,11 @@ Current structured PDF panel order:
 Structured sheet import:
 
 - User-facing guide: `STRUCTURED_SHEET_IMPORT_GUIDE.md`.
-- UI action: `Paste sheet / columns`.
+- UI actions: `Paste sheet / columns` imports sheet text; `Export sheet text` generates a paste-ready full sheet block for reuse.
 - Backend parser: `structured_extraction.parse_sheet_import()`.
+- Backend exporter: `structured_extraction.format_sheet_import_text()`.
 - API route: `POST /api/structured/sheets/parse-import`.
+- API route: `GET /api/structured/sheets/{sheet_id}/import-text`.
 - Accepted modes:
   - Full sheet import with `Sheet name ###`, `Context ###`, `More information / other preferences ###`, `Columns ###`, and column blocks.
   - Columns-only import using `Column name ###`, `Question ###`, `Rules ###`, separated by `---`.
@@ -670,6 +677,8 @@ Structured sheet locking:
 - Backend helper: `structured_extraction.lock_sheet_for_first_run(project_id, sheet_id, job_id)`.
 - Duplicate helper: `structured_extraction.duplicate_sheet(project_id, sheet_id)`.
 - Duplicate route: `POST /api/structured/sheets/{sheet_id}/duplicate`.
+- Workbook duplicate helper: `structured_extraction.duplicate_workbook(project_id, sheet_ids)`.
+- Workbook duplicate route: `POST /api/structured/workbook/duplicate`.
 - Lock metadata in `sheet.json`:
 
 ```json
@@ -755,11 +764,12 @@ User flow:
 2. User uploads a `.csv` or `.xlsx` file.
 3. User maps one or more spreadsheet columns to prompt labels.
 4. User optionally enters a Study ID column.
-5. User selects a model preset and prompt.
-6. Backend creates one job per nonblank spreadsheet row.
-7. Each row job is queued independently.
-8. UI shows row jobs in a fixed-height virtualized table.
-9. User filters/searches rows, views full output, retries failed rows, and exports a spreadsheet.
+5. CEREBRO freezes that source and mapping at project level and creates `Sheet 1`.
+6. User selects a model preset and prompt for the active workbook sheet.
+7. Running the sheet creates one independently queued job per nonblank spreadsheet row.
+8. The sheet locks on first run. Duplicate creates an editable prompt/model variant with no copied jobs or outputs.
+9. UI shows the mapped source columns and sheet-specific results in a fixed-height virtualized spreadsheet.
+10. Workbook export creates one worksheet per text extraction sheet and restores all original source columns.
 
 Supported files:
 
@@ -774,7 +784,15 @@ data/projects/<project_id>/source_files/<source_id>/
 |-- source.json
 |-- rows.jsonl
 `-- <safe_uploaded_filename>.csv|xlsx
+
+data/projects/<project_id>/
+|-- text_workbook.json
+`-- text_sheets/
+    `-- <sheet_id>/
+        `-- sheet.json
 ```
+
+`text_workbook.json` identifies the active project source and records that its mapping is frozen. Each text `sheet.json` stores sheet name/order, source id, prompt filename/content, model preset/model, timestamps, and first-run lock metadata.
 
 Text row job files:
 
@@ -797,6 +815,8 @@ Text job metadata includes:
 
 - `extraction_type: "text"`
 - `project_id`
+- `text_sheet_id`
+- `text_sheet_name`
 - `source_id`
 - `source_filename`
 - `stored_source_file`
@@ -815,6 +835,7 @@ Column mapping:
 
 - Each mapping has `column_name` and `prompt_label`.
 - Column names are trimmed and must exactly match spreadsheet headers after normalization.
+- The mapping is immutable after the project source is created and is shared by every sheet.
 - Empty cell values are preserved.
 - User prompt format:
 
@@ -833,7 +854,8 @@ Study ID behavior:
 Text queue:
 
 - `TextJobQueue` is separate from `JobQueue`.
-- Worker count is `min(MAX_OPENAI_CONCURRENT_REQUESTS, 4)` with a minimum of 1.
+- Worker count is `MAX_OPENAI_CONCURRENT_REQUESTS` with a minimum of 1 (default `15`).
+- Local text inference remains capped at 4 concurrent calls; the larger worker pool is intended for OpenAI throughput.
 - Pause stops future row starts; active model calls are allowed to finish.
 - Retry only applies to failed rows.
 - Retry requeues the same row job and preserves row order.
@@ -842,7 +864,7 @@ Text queue:
 Text list API:
 
 ```text
-GET /api/text/jobs?project_id=<id>&offset=0&limit=100&status=failed&search=abc
+GET /api/text/jobs?project_id=<id>&sheet_id=<sheet_id>&offset=0&limit=100&status=failed&search=abc
 ```
 
 Response shape:
@@ -857,16 +879,28 @@ Response shape:
 }
 ```
 
+Workbook APIs:
+
+```text
+GET  /api/text/workbook
+POST /api/text/source
+POST /api/text/sheets
+PUT  /api/text/sheets/{sheet_id}
+POST /api/text/sheets/{sheet_id}/duplicate
+POST /api/text/sheets/{sheet_id}/run
+```
+
 Server-side filtering:
 
-- Status: `all`, `queued`, `running`, `completed`, `failed`.
-- Search haystack includes record id, input preview, source filename, row number, and job id.
+- Status: `all`, `not_run`, `queued`, `running`, `completed`, `failed`.
+- Search includes record id, mapped cell values, input preview, row number, and job id.
 - Limit is capped at 500.
 
 Text export:
 
 - `GET /api/text/export`
-- Preserves original source columns.
+- Creates one worksheet per text extraction sheet in sheet order.
+- Preserves every original source column in every worksheet, including columns hidden from the browser grid.
 - Appends:
   - `cerebro_extracted_at`
   - `cerebro_processing_time_seconds`
@@ -875,8 +909,8 @@ Text export:
   - `cerebro_status`
   - `cerebro_error`
   - `cerebro_output`
-- Preserves project row order.
-- Includes queued/running/failed rows with status and blank output where appropriate.
+- Preserves source row order.
+- Includes not-run/queued/running/failed rows with status and blank output where appropriate.
 - File name pattern:
 
 ```text
@@ -897,7 +931,7 @@ Templates:
 Static JS:
 
 - `rq_screening.js`: PDF upload, prompt controls, queue polling, duplicate checks, rerun/delete, result panels, Excel report link, project sidebar.
-- `text_extraction.js`: spreadsheet upload, column mappings, prompt controls, text queue polling, virtualized row table, retry/export, project sidebar.
+- `text_extraction.js`: frozen source mapping, text workbook tabs, sheet prompt/model autosave, virtualized spreadsheet rows, retry/export, project sidebar.
 - `structured_pdf.js`: workbook sheet tabs, editable grid headers, synchronized column cards, PDF upload, virtualized row table, parse diagnostics, export, project sidebar.
 
 Styles:
@@ -925,10 +959,10 @@ Text frontend polling:
 
 - Counts poll every 2.5 seconds.
 - Visible window refresh every 3 seconds.
-- Table rows are not all rendered. The UI uses a fixed row height and a scroll spacer.
-- Visible windows request `/api/text/jobs` with `offset`, `limit`, `status`, and `search`.
+- Spreadsheet rows are not all rendered. The UI uses a fixed row height and a scroll spacer.
+- Visible windows request `/api/text/jobs` with `sheet_id`, `offset`, `limit`, `status`, and `search`.
 - Constants:
-  - `ROW_HEIGHT = 64`
+  - `ROW_HEIGHT = 42`
   - `WINDOW_LIMIT = 120`
   - `SCROLL_OVERSCAN = 12`
 
@@ -937,13 +971,11 @@ Text table columns:
 - Row
 - Status
 - Study ID / Record ID
-- Input preview
-- Model
-- Prompt
-- Started / completed
-- Duration
-- Result preview
+- One visible cell column for each project-level mapped input column
+- CEREBRO output
 - Actions
+
+The source may contain additional columns, but those are intentionally omitted from the browser grid and restored in every exported worksheet.
 
 Structured PDF table columns:
 
@@ -1027,7 +1059,7 @@ Covered areas include:
 - OpenAI response parsing.
 - Event subprocess runner.
 - OpenAI API key resolution order.
-- GPT-5.4 nano xhigh preset and hidden alias.
+- GPT-5.4 mini high preset.
 - OpenAI PDF file mode.
 - Job identity matching.
 - OCR and OpenAI file reuse helpers.
@@ -1216,13 +1248,14 @@ Text serialized row shape:
   "project_id": "...",
   "row": 1,
   "row_order": 0,
-  "status": "queued|running|completed|failed",
+  "status": "not_run|queued|running|completed|failed",
   "status_label": "Queued",
   "stage": "...",
   "message": "...",
   "error": "",
   "record_id": "Row 1",
   "input_preview": "...",
+  "mapped_cells": {"title": "Example title", "abstract": "Example abstract"},
   "model": "...",
   "prompt": "...",
   "started_at": "",
@@ -1241,9 +1274,12 @@ These are useful checks for future LLMs before editing:
 - PDF pause/resume is global even though status is project-filtered.
 - Text pause/resume is a separate queue and lets active rows finish.
 - Text extraction listing is server-windowed and frontend-virtualized. Avoid replacing it with all-row DOM rendering.
+- Text projects have one frozen source/mapping in `text_workbook.json`; sheets vary prompt/model configuration, not source columns.
+- Legacy text jobs are adopted idempotently into locked text sheets and receive `text_sheet_id` metadata without recreating jobs.
+- Text sheets lock on first run. Duplicates are inserted directly after the source sheet and copy configuration without jobs/results.
 - Existing projects without `extraction_type` are treated as PDF projects by `normalize_extraction_type`.
 - Structured PDF projects use `extraction_type: "pdf_structured"` and route to `/structured-pdf`.
-- The hidden `openai_gpt54_mini_high` preset is a backward-compatible alias to `gpt-5.4-nano` with `xhigh` reasoning.
+- `openai_gpt54_mini_high` is a public preset for `gpt-5.4-mini` with `high` reasoning.
 - Prompt files are shared globally across projects, not stored per project.
 - Runtime Excel summaries can be rebuilt from active jobs.
 - Structured PDF parse failures still mark the underlying model job complete; the parse status is carried separately in metadata and sheet error records.
@@ -1280,19 +1316,19 @@ Text flow:
 2. Upload a small CSV/XLSX with `title`, `abstract`, and `doi`.
 3. Map `title -> Title` and `abstract -> Abstract`.
 4. Set Study ID column to `doi` or leave blank.
-5. Queue row jobs.
-6. Confirm counts update.
-7. Filter by status.
-8. Search by Study ID / Record ID.
-9. Open a row output.
-10. Retry a failed row if available.
-11. Export spreadsheet.
+5. Confirm `Sheet 1` opens and only the mapped input columns appear in the white spreadsheet grid.
+6. Select a prompt/model and run the sheet.
+7. Confirm counts and visible row statuses update.
+8. Duplicate the sheet and confirm the duplicate is directly to its right, editable, and contains no jobs/results.
+9. Filter by status and search by Study ID / Record ID.
+10. Open a row output and retry a failed row if available.
+11. Export the workbook and confirm every worksheet contains all original source columns.
 
 Large text performance check:
 
 1. Upload a CSV with tens of thousands of rows.
 2. Confirm the browser renders only the visible row window.
-3. Confirm `/api/text/jobs` uses `offset` and `limit`.
+3. Confirm `/api/text/jobs` uses `sheet_id`, `offset`, and `limit`.
 4. Confirm polling does not download all rows repeatedly.
 
 Structured PDF flow:

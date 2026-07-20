@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import threading
 import unittest
+from io import BytesIO
 from pathlib import Path
 
 from app import config
@@ -101,24 +103,23 @@ class SharedHelperTests(unittest.TestCase):
         finally:
             openai_rq.OPENAI_API_KEY_FILE = original_key_file
 
-    def test_gpt54_nano_xhigh_preset_is_public_openai_model(self) -> None:
-        settings = JobSettings.from_form({"rq_model_preset": "openai_gpt54_nano_xhigh"})
-        self.assertEqual(settings.rq_provider, "openai")
-        self.assertEqual(settings.rq_screening_model, "gpt-5.4-nano")
-        self.assertTrue(settings.rq_enable_thinking)
-        self.assertEqual(settings.openai_reasoning_effort, "xhigh")
-
-        public_presets = {preset["id"]: preset for preset in public_model_presets()}
-        self.assertIn("openai_gpt54_nano_xhigh", public_presets)
-        self.assertNotIn("openai_gpt54_mini_high", public_presets)
-        self.assertEqual(public_presets["openai_gpt54_nano_xhigh"]["settings"]["model"], "gpt-5.4-nano")
-        self.assertEqual(public_presets["openai_gpt54_nano_xhigh"]["settings"]["openai_reasoning_effort"], "xhigh")
-
-    def test_gpt54_mini_high_preset_aliases_to_nano_xhigh(self) -> None:
+    def test_gpt54_mini_high_preset_is_public_openai_model(self) -> None:
         settings = JobSettings.from_form({"rq_model_preset": "openai_gpt54_mini_high"})
         self.assertEqual(settings.rq_provider, "openai")
-        self.assertEqual(settings.rq_screening_model, "gpt-5.4-nano")
-        self.assertEqual(settings.openai_reasoning_effort, "xhigh")
+        self.assertEqual(settings.rq_screening_model, "gpt-5.4-mini")
+        self.assertTrue(settings.rq_enable_thinking)
+        self.assertEqual(settings.openai_reasoning_effort, "high")
+
+        public_presets = {preset["id"]: preset for preset in public_model_presets()}
+        self.assertIn("openai_gpt54_mini_high", public_presets)
+        self.assertEqual(public_presets["openai_gpt54_mini_high"]["settings"]["model"], "gpt-5.4-mini")
+        self.assertEqual(public_presets["openai_gpt54_mini_high"]["settings"]["openai_reasoning_effort"], "high")
+
+    def test_gpt54_mini_high_preset_aliases_to_mini_high(self) -> None:
+        settings = JobSettings.from_form({"rq_model_preset": "openai_gpt54_mini_high"})
+        self.assertEqual(settings.rq_provider, "openai")
+        self.assertEqual(settings.rq_screening_model, "gpt-5.4-mini")
+        self.assertEqual(settings.openai_reasoning_effort, "high")
 
     def test_openai_pdf_file_mode_is_openai_only(self) -> None:
         openai_settings = JobSettings.from_form(
@@ -144,13 +145,13 @@ class SharedHelperTests(unittest.TestCase):
             openai_rq.run_event_process = fake_runner
             openai_rq.run_openai_rq(
                 job_id="job-file",
-                model="gpt-5.4-nano",
+                model="gpt-5.4-mini",
                 system_prompt_file=Path("system.txt"),
                 user_prompt_file=Path("user.txt"),
                 output_file=Path("out.md"),
                 max_tokens=100,
                 enable_reasoning=True,
-                reasoning_effort="xhigh",
+                reasoning_effort="high",
                 input_file_id="file-abc",
             )
         finally:
@@ -654,6 +655,75 @@ class RerunEndpointTests(unittest.TestCase):
             config.PROJECTS_DIR = original_projects_dir
 
 
+class TextWorkbookTests(unittest.TestCase):
+    def test_text_workbook_freezes_mapping_duplicates_sheets_and_exports_full_rows(self) -> None:
+        from openpyxl import load_workbook
+        from starlette.datastructures import UploadFile
+
+        from app.services import projects, text_extraction
+
+        original_projects_dir = config.PROJECTS_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config.PROJECTS_DIR = Path(tmpdir) / "projects"
+                config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+                project = projects.create_project("Text workbook", "", "text")
+                upload = UploadFile(
+                    filename="records.csv",
+                    file=BytesIO(b"study_id,title,abstract,authors\nS1,First title,First abstract,A One\nS2,Second title,,B Two\n"),
+                )
+                created = text_extraction.create_text_source(
+                    project_id=str(project["project_id"]),
+                    upload_file=upload,
+                    column_mappings=[
+                        {"column_name": "title", "prompt_label": "Title"},
+                        {"column_name": "abstract", "prompt_label": "Abstract"},
+                    ],
+                    study_id_column="study_id",
+                    initial_settings=JobSettings(rq_prompt_filename="screening.txt", rq_system_prompt="Screen each record."),
+                )
+
+                self.assertEqual(created["source"]["row_count"], 2)
+                self.assertEqual([mapping["column_name"] for mapping in created["source"]["column_mappings"]], ["title", "abstract"])
+                first_sheet = created["sheet"]
+                rows = text_extraction.list_text_jobs(
+                    project_id=str(project["project_id"]),
+                    sheet_id=str(first_sheet["sheet_id"]),
+                )
+                self.assertEqual(rows["total"], 2)
+                self.assertEqual(rows["items"][0]["status"], "not_run")
+                self.assertEqual(rows["items"][0]["mapped_cells"], {"title": "First title", "abstract": "First abstract"})
+
+                duplicate = text_extraction.duplicate_text_sheet(str(project["project_id"]), str(first_sheet["sheet_id"]))
+                self.assertEqual(duplicate["name"], "Sheet 1 (1)")
+                self.assertEqual(
+                    [sheet["name"] for sheet in text_extraction.list_text_sheets(str(project["project_id"]))],
+                    ["Sheet 1", "Sheet 1 (1)"],
+                )
+                self.assertEqual(duplicate["rq_system_prompt"], "Screen each record.")
+                self.assertEqual(text_extraction.text_job_records(str(project["project_id"]), sheet_id=str(duplicate["sheet_id"])), [])
+
+                with self.assertRaises(ValueError):
+                    text_extraction.create_text_source(
+                        project_id=str(project["project_id"]),
+                        upload_file=UploadFile(filename="replacement.csv", file=BytesIO(b"title\nReplacement\n")),
+                        column_mappings=[{"column_name": "title", "prompt_label": "Title"}],
+                    )
+
+                export_path = text_extraction.export_text_results(str(project["project_id"]))
+                workbook = load_workbook(export_path, read_only=True, data_only=True)
+                self.assertEqual(workbook.sheetnames, ["Sheet 1", "Sheet 1 (1)"])
+                worksheet = workbook["Sheet 1"]
+                headers = [cell.value for cell in next(worksheet.iter_rows(min_row=1, max_row=1))]
+                self.assertEqual(headers[:4], ["study_id", "title", "abstract", "authors"])
+                self.assertEqual(headers[-1], "cerebro_output")
+                self.assertEqual(worksheet.max_row - 1, 2)
+                self.assertEqual(worksheet.cell(row=2, column=headers.index("cerebro_status") + 1).value, "Not run")
+                workbook.close()
+        finally:
+            config.PROJECTS_DIR = original_projects_dir
+
+
 class StructuredExtractionTests(unittest.TestCase):
     def test_project_type_normalizes_structured_pdf(self) -> None:
         from app.services import projects
@@ -698,7 +768,7 @@ class StructuredExtractionTests(unittest.TestCase):
                     "job_id": "job-1",
                     "source_pdf": "paper.pdf",
                     "extracted_at": "2026-06-19T00:00:00Z",
-                    "model": "gpt-5.4-nano",
+                    "model": "gpt-5.4-mini",
                     "parse_status": "parsed",
                     "parse_error": "",
                     "cells": {"SpeciesLatinArticle": "Ailuropoda melanoleuca"},
@@ -855,6 +925,39 @@ Use article wording.
         self.assertEqual(payload["conflicts"]["fields"], ["Context"])
         self.assertEqual(payload["conflicts"]["columns"], ["AnimalWelfare"])
 
+    def test_sheet_import_text_export_matches_guide_format(self) -> None:
+        from app.services import structured_extraction
+
+        text = structured_extraction.format_sheet_import_text(
+            {
+                "name": "Species characteristics",
+                "context": "Review of captive wild animal articles.",
+                "row_unit": "One row per eligible animal species.",
+                "columns": [
+                    {
+                        "column_name": "SpeciesLatinArticle",
+                        "question": "State the scientific name.",
+                        "rules": "* Enter NA if absent.",
+                    },
+                    {
+                        "column_name": "SpeciesCommonArticle",
+                        "question": "State the common name.",
+                        "rules": "* Use article wording.",
+                    },
+                ],
+            }
+        )
+
+        self.assertIn("Sheet name ### Species characteristics", text)
+        self.assertIn("Context ###\nReview of captive wild animal articles.", text)
+        self.assertIn("More information / other preferences ###\nOne row per eligible animal species.", text)
+        self.assertIn("Columns ###\n\nColumn name ### SpeciesLatinArticle", text)
+        self.assertIn("\n\n---\n\nColumn name ### SpeciesCommonArticle", text)
+
+        payload = structured_extraction.parse_sheet_import(text)
+        self.assertEqual(payload["fields"]["name"], "Species characteristics")
+        self.assertEqual([column["column_name"] for column in payload["columns"]], ["SpeciesLatinArticle", "SpeciesCommonArticle"])
+
     def test_sheet_import_parser_accepts_columns_only_and_validates(self) -> None:
         from app.services import structured_extraction
 
@@ -942,7 +1045,7 @@ Rules ###
                             "job_id": "job-1",
                             "source_pdf": "paper.pdf",
                             "extracted_at": "2026-06-19T00:00:00Z",
-                            "model": "gpt-5.4-nano",
+                            "model": "gpt-5.4-mini",
                             "parse_status": "parsed",
                             "parse_error": "",
                             "cells": {"SpeciesLatinArticle": "Ailuropoda melanoleuca"},
@@ -994,7 +1097,7 @@ Rules ###
                     root,
                     extraction_type="pdf_structured",
                     structured_sheet_id=sheet["sheet_id"],
-                    rq_screening_model="gpt-5.4-nano",
+                    rq_screening_model="gpt-5.4-mini",
                     source_relative_path="Pilots/live.pdf",
                 )
 
@@ -1077,6 +1180,75 @@ Rules ###
         finally:
             config.PROJECTS_DIR = original_projects_dir
 
+    def test_structured_workbook_duplicate_copies_selected_schemas_without_data(self) -> None:
+        from app.services import projects, structured_extraction
+
+        original_projects_dir = config.PROJECTS_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config.PROJECTS_DIR = Path(tmpdir) / "projects"
+                config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+                project = projects.create_project("Workbook", "Source description.", "pdf_structured")
+                projects.create_project("Workbook (1)", "Existing copy.", "pdf_structured")
+                first = structured_extraction.create_sheet(
+                    project_id=str(project["project_id"]),
+                    name="First",
+                    context="First context.",
+                    row_unit="First preferences.",
+                    columns=[{"column_name": "FirstValue", "question": "Extract first.", "rules": "Rule one."}],
+                )
+                second = structured_extraction.create_sheet(
+                    project_id=str(project["project_id"]),
+                    name="Second",
+                    context="Second context.",
+                    columns=[{"column_name": "SecondValue", "question": "Extract second.", "rules": ""}],
+                )
+                third = structured_extraction.create_sheet(
+                    project_id=str(project["project_id"]),
+                    name="Third",
+                    context="Third context.",
+                    columns=[{"column_name": "ThirdValue", "question": "Extract third.", "rules": "Rule three."}],
+                )
+                structured_extraction.replace_job_sheet_records(
+                    str(project["project_id"]),
+                    str(first["sheet_id"]),
+                    "source-job",
+                    [{"job_id": "source-job", "source_pdf": "source.pdf", "cells": {"FirstValue": "value"}}],
+                    [{"job_id": "source-error", "source_pdf": "failed.pdf", "parse_error": "failed", "cells": {}}],
+                )
+                structured_extraction.lock_sheet_for_first_run(str(project["project_id"]), str(first["sheet_id"]), "source-job")
+
+                duplicated = structured_extraction.duplicate_workbook(
+                    str(project["project_id"]),
+                    [str(third["sheet_id"]), str(first["sheet_id"])],
+                )
+                copied_project = duplicated["project"]
+                copied_sheets = duplicated["sheets"]
+
+                self.assertEqual(copied_project["name"], "Workbook (2)")
+                self.assertEqual(copied_project["description"], "Source description.")
+                self.assertEqual(copied_project["extraction_type"], "pdf_structured")
+                self.assertEqual(
+                    copied_project["dashboard_path"],
+                    f"/structured-pdf?project_id={copied_project['project_id']}",
+                )
+                self.assertEqual([sheet["name"] for sheet in copied_sheets], ["First", "Third"])
+                self.assertEqual(copied_sheets[0]["context"], "First context.")
+                self.assertEqual(copied_sheets[0]["row_unit"], "First preferences.")
+                self.assertEqual(copied_sheets[0]["columns"][0]["rules"], "Rule one.")
+                self.assertTrue(all(not sheet["is_locked"] for sheet in copied_sheets))
+                self.assertEqual(
+                    structured_extraction.list_rows(
+                        project_id=str(copied_project["project_id"]),
+                        sheet_id=str(copied_sheets[0]["sheet_id"]),
+                    )["total"],
+                    0,
+                )
+                self.assertEqual(list(projects.get_project_jobs_dir(str(copied_project["project_id"])).iterdir()), [])
+                self.assertNotIn(str(second["sheet_id"]), {str(sheet["sheet_id"]) for sheet in copied_sheets})
+        finally:
+            config.PROJECTS_DIR = original_projects_dir
+
     def test_structured_sheet_locks_and_duplicates_without_rows(self) -> None:
         from app.services import projects, structured_extraction
 
@@ -1105,7 +1277,7 @@ Rules ###
                             "job_id": "job-1",
                             "source_pdf": "paper.pdf",
                             "extracted_at": "2026-06-19T00:00:00Z",
-                            "model": "gpt-5.4-nano",
+                            "model": "gpt-5.4-mini",
                             "parse_status": "parsed",
                             "parse_error": "",
                             "cells": {"SpeciesLatinArticle": "Ailuropoda melanoleuca"},
@@ -1149,7 +1321,7 @@ Rules ###
         from fastapi.testclient import TestClient
 
         from app.main import app
-        from app.services import projects
+        from app.services import projects, structured_extraction
 
         original_projects_dir = config.PROJECTS_DIR
         try:
@@ -1158,6 +1330,13 @@ Rules ###
                 config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
                 structured_project = projects.create_project("Structured Project", "", "pdf_structured")
                 pdf_project = projects.create_project("PDF Project", "", "pdf")
+                sheet = structured_extraction.create_sheet(
+                    project_id=str(structured_project["project_id"]),
+                    name="Study fields",
+                    context="Study context.",
+                    row_unit="One row per study.",
+                    columns=[{"column_name": "StudyTitle", "question": "State the title.", "rules": "Enter NA if absent."}],
+                )
                 client = TestClient(app)
 
                 response = client.get(
@@ -1166,10 +1345,30 @@ Rules ###
                 )
                 self.assertEqual(response.status_code, 200)
                 self.assertIn("Workbook-style PDF extraction", response.text)
+                self.assertIn('id="duplicateWorkbookButton"', response.text)
 
                 api_response = client.get(f"/api/structured/sheets?project_id={structured_project['project_id']}")
                 self.assertEqual(api_response.status_code, 200)
-                self.assertEqual(api_response.json()["sheets"], [])
+                self.assertEqual(len(api_response.json()["sheets"]), 1)
+
+                text_response = client.get(
+                    f"/api/structured/sheets/{sheet['sheet_id']}/import-text?project_id={structured_project['project_id']}"
+                )
+                self.assertEqual(text_response.status_code, 200)
+                self.assertIn("Sheet name ### Study fields", text_response.text)
+                self.assertIn("Column name ### StudyTitle", text_response.text)
+
+                duplicate_response = client.post(
+                    "/api/structured/workbook/duplicate",
+                    data={
+                        "project_id": structured_project["project_id"],
+                        "sheet_ids": json.dumps([sheet["sheet_id"]]),
+                    },
+                )
+                self.assertEqual(duplicate_response.status_code, 200)
+                duplicated_payload = duplicate_response.json()
+                self.assertEqual(duplicated_payload["project"]["name"], "Structured Project (1)")
+                self.assertEqual([item["name"] for item in duplicated_payload["sheets"]], ["Study fields"])
 
                 wrong_type_response = client.get(
                     f"/structured-pdf?project_id={pdf_project['project_id']}",

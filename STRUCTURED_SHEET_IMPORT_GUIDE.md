@@ -161,3 +161,15 @@ Information I want to extract:
 7. Review the spreadsheet headers and column instruction boxes.
 8. Wait for autosave to show that the draft is saved.
 9. Run extraction only when the schema is ready.
+
+## Exporting A Sheet For Reuse
+
+To reuse an existing worksheet in another structured PDF workbook:
+
+1. Open the source sheet in CEREBRO.
+2. Click `Export sheet text` beside `Paste sheet / columns`.
+3. Copy the generated text, or download it as a `.txt` file.
+4. Open the target workbook sheet.
+5. Click `Paste sheet / columns` and paste the exported text.
+
+The exported text uses the same full sheet import format described above.

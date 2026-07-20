@@ -131,6 +131,51 @@ def duplicate_sheet(project_id: str, sheet_id: str) -> dict[str, Any]:
     return read_sheet_file(root / SHEET_FILENAME)
 
 
+def duplicate_workbook(project_id: str, sheet_ids: list[str]) -> dict[str, Any]:
+    source_project = require_structured_project(project_id)
+    selected_ids = {validate_sheet_id(sheet_id) for sheet_id in sheet_ids if str(sheet_id or "").strip()}
+    if not selected_ids:
+        raise ValueError("Select at least one sheet to duplicate.")
+
+    source_sheets = list_sheets(project_id)
+    selected_sheets = [sheet for sheet in source_sheets if str(sheet.get("sheet_id") or "") in selected_ids]
+    if len(selected_sheets) != len(selected_ids):
+        raise ValueError("One or more selected sheets do not belong to this workbook.")
+
+    project = projects.create_project(
+        next_workbook_copy_name(str(source_project.get("name") or "Structured workbook")),
+        str(source_project.get("description") or ""),
+        STRUCTURED_EXTRACTION_TYPE,
+    )
+    copied_sheets: list[dict[str, Any]] = []
+    try:
+        for sheet in selected_sheets:
+            copied_sheets.append(
+                create_sheet(
+                    project_id=str(project["project_id"]),
+                    name=str(sheet.get("name") or "Sheet"),
+                    context=str(sheet.get("context") or ""),
+                    row_unit=str(sheet.get("row_unit") or ""),
+                    columns=[
+                        {
+                            "column_name": str(column.get("column_name") or ""),
+                            "question": str(column.get("question") or ""),
+                            "rules": str(column.get("rules") or ""),
+                        }
+                        for column in sheet.get("columns") or []
+                    ],
+                )
+            )
+    except Exception:
+        shutil.rmtree(projects.project_root(str(project["project_id"])), ignore_errors=True)
+        raise
+    return {
+        "source_project_id": project_id,
+        "project": project,
+        "sheets": copied_sheets,
+    }
+
+
 def delete_sheet(project_id: str, sheet_id: str) -> None:
     get_sheet(project_id, sheet_id)
     root = sheet_root(project_id, sheet_id)
@@ -189,6 +234,42 @@ def parse_sheet_import(raw_text: str, current_sheet: dict[str, Any] | None = Non
         "has_conflicts": bool(conflicts["fields"] or conflicts["columns"]),
         "conflicts": conflicts,
     }
+
+
+def format_sheet_import_text(sheet: dict[str, Any]) -> str:
+    columns = normalize_columns(sheet.get("columns") or [], require_questions=False)
+    column_blocks = []
+    for column in columns:
+        column_blocks.append(
+            "\n".join(
+                [
+                    f"Column name ### {column['column_name']}",
+                    "",
+                    f"Question ### {column.get('question') or ''}",
+                    "",
+                    "Rules ###",
+                    str(column.get("rules") or "").strip(),
+                ]
+            ).rstrip()
+        )
+    return (
+        "\n".join(
+            [
+                f"Sheet name ### {str(sheet.get('name') or 'Sheet').strip() or 'Sheet'}",
+                "",
+                "Context ###",
+                str(sheet.get("context") or "").strip(),
+                "",
+                "More information / other preferences ###",
+                str(sheet.get("row_unit") or "").strip(),
+                "",
+                "Columns ###",
+                "",
+                "\n\n---\n\n".join(column_blocks),
+            ]
+        ).rstrip()
+        + "\n"
+    )
 
 
 def parse_sheet_import_fields(text: str) -> tuple[dict[str, str], str]:
@@ -668,6 +749,15 @@ def unique_duplicate_sheet_name(project_id: str, name: str) -> str:
     existing = {str(sheet.get("name") or "") for sheet in list_sheets(project_id)}
     base = duplicate_base_name(name)
     return next_duplicate_name(base, existing)
+
+
+def next_workbook_copy_name(name: str) -> str:
+    base = duplicate_base_name(name or "Structured workbook")
+    existing = {str(project.get("name") or "").casefold() for project in projects.list_projects()}
+    index = 1
+    while f"{base} ({index})".casefold() in existing:
+        index += 1
+    return f"{base} ({index})"
 
 
 def duplicate_base_name(name: str) -> str:

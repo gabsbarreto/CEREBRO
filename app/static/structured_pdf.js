@@ -12,6 +12,7 @@ const sheetTabsScrollRight = document.querySelector("#sheetTabsScrollRight");
 const addSheetButton = document.querySelector("#addSheetButton");
 const saveSheetButton = document.querySelector("#saveSheetButton");
 const duplicateSheetButton = document.querySelector("#duplicateSheetButton");
+const duplicateWorkbookButton = document.querySelector("#duplicateWorkbookButton");
 const deleteSheetButton = document.querySelector("#deleteSheetButton");
 const sheetLockNotice = document.querySelector("#sheetLockNotice");
 const sheetForm = document.querySelector("#sheetForm");
@@ -21,6 +22,7 @@ const sheetRowUnitInput = document.querySelector("#sheetRowUnitInput");
 const columnEditorList = document.querySelector("#columnEditorList");
 const addColumnButton = document.querySelector("#addColumnButton");
 const pasteColumnsButton = document.querySelector("#pasteColumnsButton");
+const exportSheetTextButton = document.querySelector("#exportSheetTextButton");
 const sheetFormStatus = document.querySelector("#sheetFormStatus");
 const compiledPromptPreview = document.querySelector("#compiledPromptPreview");
 const structuredExportLink = document.querySelector("#structuredExportLink");
@@ -45,6 +47,19 @@ const closePasteColumnsButton = document.querySelector("#closePasteColumnsButton
 const pasteColumnsInput = document.querySelector("#pasteColumnsInput");
 const pasteColumnsStatus = document.querySelector("#pasteColumnsStatus");
 const parseColumnsButton = document.querySelector("#parseColumnsButton");
+const exportSheetTextModal = document.querySelector("#exportSheetTextModal");
+const closeExportSheetTextButton = document.querySelector("#closeExportSheetTextButton");
+const exportSheetTextOutput = document.querySelector("#exportSheetTextOutput");
+const exportSheetTextStatus = document.querySelector("#exportSheetTextStatus");
+const copySheetTextButton = document.querySelector("#copySheetTextButton");
+const downloadSheetTextButton = document.querySelector("#downloadSheetTextButton");
+const duplicateWorkbookModal = document.querySelector("#duplicateWorkbookModal");
+const closeDuplicateWorkbookButton = document.querySelector("#closeDuplicateWorkbookButton");
+const cancelDuplicateWorkbookButton = document.querySelector("#cancelDuplicateWorkbookButton");
+const confirmDuplicateWorkbookButton = document.querySelector("#confirmDuplicateWorkbookButton");
+const duplicateWorkbookSelectAll = document.querySelector("#duplicateWorkbookSelectAll");
+const duplicateWorkbookSheetList = document.querySelector("#duplicateWorkbookSheetList");
+const duplicateWorkbookStatus = document.querySelector("#duplicateWorkbookStatus");
 const currentProjectId = document.body.dataset.currentProjectId || document.querySelector("#currentProjectId")?.value || "";
 const projectSidebar = document.querySelector("#projectSidebar");
 const sidebarToggle = document.querySelector("#sidebarToggle");
@@ -111,12 +126,27 @@ saveSheetButton.addEventListener("click", async () => {
 });
 
 duplicateSheetButton?.addEventListener("click", duplicateActiveSheet);
+duplicateWorkbookButton?.addEventListener("click", openDuplicateWorkbookDialog);
 deleteSheetButton.addEventListener("click", deleteActiveSheet);
 addColumnButton.addEventListener("click", () => addSchemaColumn());
 addColumnDivider?.addEventListener("click", () => addSchemaColumn({ focusNewColumn: true }));
+exportSheetTextButton?.addEventListener("click", exportActiveSheetText);
 pasteColumnsButton.addEventListener("click", () => openModal(pasteColumnsModal));
 closePasteColumnsButton.addEventListener("click", () => closeModal(pasteColumnsModal));
 parseColumnsButton.addEventListener("click", parsePastedColumns);
+closeExportSheetTextButton?.addEventListener("click", () => closeModal(exportSheetTextModal));
+copySheetTextButton?.addEventListener("click", copyExportedSheetText);
+downloadSheetTextButton?.addEventListener("click", downloadExportedSheetText);
+closeDuplicateWorkbookButton?.addEventListener("click", () => closeModal(duplicateWorkbookModal));
+cancelDuplicateWorkbookButton?.addEventListener("click", () => closeModal(duplicateWorkbookModal));
+confirmDuplicateWorkbookButton?.addEventListener("click", duplicateSelectedWorkbookSheets);
+duplicateWorkbookSelectAll?.addEventListener("change", () => {
+  duplicateWorkbookSheetList?.querySelectorAll('input[type="checkbox"]').forEach((checkbox) => {
+    checkbox.checked = duplicateWorkbookSelectAll.checked;
+  });
+  updateDuplicateWorkbookSelection();
+});
+duplicateWorkbookSheetList?.addEventListener("change", updateDuplicateWorkbookSelection);
 
 sheetForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -130,8 +160,7 @@ for (const input of [sheetNameInput, sheetContextInput, sheetRowUnitInput]) {
     activeSheet.name = sheetNameInput.value;
     activeSheet.context = sheetContextInput.value;
     activeSheet.row_unit = sheetRowUnitInput.value;
-    markSheetDirty();
-    renderSheetTabs();
+    markSheetDirty({ renderTabs: input === sheetNameInput });
     renderPromptPreview();
   });
 }
@@ -411,7 +440,7 @@ function renderActiveSheet() {
   isRenderingSheet = false;
 }
 
-function renderSheetTabs() {
+function renderSheetTabs(options = {}) {
   if (!sheetTabs) return;
   sheetTabs.innerHTML = (sheets || [])
     .map((sheet) => {
@@ -439,7 +468,9 @@ function renderSheetTabs() {
     });
   });
   requestAnimationFrame(() => {
-    sheetTabs.querySelector(".sheet-tab.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    if (options.scrollActive !== false) {
+      sheetTabs.querySelector(".sheet-tab.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
     updateSheetTabScrollControls();
   });
 }
@@ -629,7 +660,7 @@ async function saveActiveSheet(options = {}) {
   sheets = payload.sheets || [];
   activeSheet = payload.sheet || activeSheet;
   hasUnsavedSheetChanges = false;
-  renderSheetTabs();
+  renderSheetTabs({ scrollActive: !options.autosave });
   applySheetLockState();
   if (!options.autosave) renderActiveSheet();
   if (options.autosave) renderPromptPreview();
@@ -690,6 +721,135 @@ async function duplicateActiveSheet() {
   setSheetStatus(`Duplicated ${activeSheet?.name || "sheet"}.`, "complete");
 }
 
+async function openDuplicateWorkbookDialog() {
+  if (hasUnsavedSheetChanges && !isActiveSheetLocked()) {
+    const saved = await saveActiveSheet({ silent: true, requireReady: false });
+    if (!saved) return;
+  }
+  duplicateWorkbookSheetList.innerHTML = (sheets || [])
+    .map((sheet) => {
+      const columnCount = Array.isArray(sheet.columns) ? sheet.columns.length : 0;
+      const detail = `${columnCount} column${columnCount === 1 ? "" : "s"}${sheet.is_locked ? " - run" : " - editable"}`;
+      return `
+        <label class="duplicate-workbook-sheet-option">
+          <input type="checkbox" value="${escapeAttribute(sheet.sheet_id || "")}" checked />
+          <span>
+            <strong>${escapeHtml(sheet.name || "Sheet")}</strong>
+            <small>${escapeHtml(detail)}</small>
+          </span>
+        </label>
+      `;
+    })
+    .join("");
+  duplicateWorkbookStatus.textContent = "";
+  duplicateWorkbookStatus.className = "prompt-status";
+  updateDuplicateWorkbookSelection();
+  openModal(duplicateWorkbookModal);
+}
+
+function updateDuplicateWorkbookSelection() {
+  const checkboxes = Array.from(duplicateWorkbookSheetList?.querySelectorAll('input[type="checkbox"]') || []);
+  const selectedCount = checkboxes.filter((checkbox) => checkbox.checked).length;
+  if (duplicateWorkbookSelectAll) {
+    duplicateWorkbookSelectAll.checked = Boolean(checkboxes.length) && selectedCount === checkboxes.length;
+    duplicateWorkbookSelectAll.indeterminate = selectedCount > 0 && selectedCount < checkboxes.length;
+  }
+  if (confirmDuplicateWorkbookButton) confirmDuplicateWorkbookButton.disabled = selectedCount === 0;
+  if (duplicateWorkbookStatus && selectedCount > 0) {
+    duplicateWorkbookStatus.textContent = `${selectedCount} sheet${selectedCount === 1 ? "" : "s"} selected.`;
+    duplicateWorkbookStatus.className = "prompt-status";
+  } else if (duplicateWorkbookStatus) {
+    duplicateWorkbookStatus.textContent = "Select at least one sheet.";
+    duplicateWorkbookStatus.className = "prompt-status";
+  }
+}
+
+async function duplicateSelectedWorkbookSheets() {
+  const selectedSheetIds = Array.from(duplicateWorkbookSheetList?.querySelectorAll('input[type="checkbox"]:checked') || [])
+    .map((checkbox) => checkbox.value)
+    .filter(Boolean);
+  if (!selectedSheetIds.length) {
+    duplicateWorkbookStatus.textContent = "Select at least one sheet to duplicate.";
+    duplicateWorkbookStatus.className = "prompt-status failed";
+    return;
+  }
+  confirmDuplicateWorkbookButton.disabled = true;
+  duplicateWorkbookStatus.textContent = "Creating workbook copy...";
+  duplicateWorkbookStatus.className = "prompt-status queued";
+  const body = buildProjectFormData();
+  body.append("sheet_ids", JSON.stringify(selectedSheetIds));
+  try {
+    const response = await fetch("/api/structured/workbook/duplicate", { method: "POST", body });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.detail || "Could not duplicate workbook.");
+    const dashboardPath = payload.project?.dashboard_path;
+    if (!dashboardPath) throw new Error("The new workbook was created without a dashboard path.");
+    duplicateWorkbookStatus.textContent = `Created ${payload.project.name}. Opening workbook...`;
+    duplicateWorkbookStatus.className = "prompt-status complete";
+    window.location.assign(dashboardPath);
+  } catch (error) {
+    duplicateWorkbookStatus.textContent = error.message || "Could not duplicate workbook.";
+    duplicateWorkbookStatus.className = "prompt-status failed";
+    confirmDuplicateWorkbookButton.disabled = false;
+  }
+}
+
+async function exportActiveSheetText() {
+  if (!activeSheet) return;
+  if (hasUnsavedSheetChanges && !isActiveSheetLocked()) {
+    const saved = await saveActiveSheet({ silent: true, requireReady: false });
+    if (!saved) return;
+  }
+  const response = await fetch(withProject(`/api/structured/sheets/${encodeURIComponent(activeSheet.sheet_id)}/import-text`));
+  const text = await response.text();
+  if (!response.ok) {
+    let message = text || "Could not export sheet text.";
+    try {
+      message = JSON.parse(text).detail || message;
+    } catch (_error) {
+      // The endpoint normally returns text/plain; keep the raw response as fallback.
+    }
+    setSheetStatus(message, "failed");
+    return;
+  }
+  exportSheetTextOutput.value = text;
+  exportSheetTextStatus.textContent = "Sheet text is ready to copy or download.";
+  exportSheetTextStatus.className = "prompt-status complete";
+  openModal(exportSheetTextModal);
+  exportSheetTextOutput.focus();
+  exportSheetTextOutput.select();
+}
+
+async function copyExportedSheetText() {
+  const text = exportSheetTextOutput?.value || "";
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (_error) {
+    exportSheetTextOutput.focus();
+    exportSheetTextOutput.select();
+    document.execCommand("copy");
+  }
+  exportSheetTextStatus.textContent = "Copied sheet text.";
+  exportSheetTextStatus.className = "prompt-status complete";
+}
+
+function downloadExportedSheetText() {
+  const text = exportSheetTextOutput?.value || "";
+  if (!text) return;
+  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${downloadSafeName(activeSheet?.name || "structured-sheet")}_structured_sheet.txt`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+  exportSheetTextStatus.textContent = "Downloaded sheet text.";
+  exportSheetTextStatus.className = "prompt-status complete";
+}
+
 async function parsePastedColumns() {
   if (!activeSheet) return;
   if (isActiveSheetLocked()) {
@@ -721,7 +881,7 @@ async function parsePastedColumns() {
     }
   }
   applySheetImport(payload);
-  markSheetDirty();
+  markSheetDirty({ renderTabs: Boolean((payload.fields || {}).name) });
   renderColumnCards();
   renderStructuredHeader(activeSheet.columns);
   renderRows();
@@ -1250,8 +1410,10 @@ function applySheetLockState() {
   sheetRowUnitInput.disabled = locked || !hasSheet;
   addColumnButton.disabled = locked || !hasSheet;
   pasteColumnsButton.disabled = locked || !hasSheet;
+  if (exportSheetTextButton) exportSheetTextButton.disabled = !hasSheet;
   saveSheetButton.disabled = locked || !hasSheet || isSavingSheet;
   if (duplicateSheetButton) duplicateSheetButton.disabled = !hasSheet;
+  if (duplicateWorkbookButton) duplicateWorkbookButton.disabled = !hasSheet;
   sheetLockNotice?.classList.toggle("hidden", !locked);
   if (locked) {
     addColumnDivider?.classList.add("hidden");
@@ -1278,13 +1440,21 @@ function nextSheetName() {
   return `Sheet ${index}`;
 }
 
-function markSheetDirty() {
+function downloadSafeName(value) {
+  return String(value || "structured-sheet")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "structured-sheet";
+}
+
+function markSheetDirty(options = {}) {
   if (isActiveSheetLocked()) {
     setSheetStatus("Sheet schema is locked for reproducibility. Duplicate it to edit.", "complete");
     return;
   }
   hasUnsavedSheetChanges = true;
-  renderSheetTabs();
+  if (options.renderTabs) renderSheetTabs({ scrollActive: false });
   saveSheetButton.classList.add("queued");
   scheduleAutosave();
 }

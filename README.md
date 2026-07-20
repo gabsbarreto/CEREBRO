@@ -16,7 +16,7 @@ Core workflow:
 4. Choose a processing pathway:
    - OCR/text pathway: render PDF pages, run local OCR, merge text, then send the text to a local model or OpenAI model.
    - OpenAI file/source pathway: upload the PDF to OpenAI and send the file source with the extraction prompt.
-5. For text extraction, upload a CSV/XLSX file and map spreadsheet columns to prompt labels.
+5. For text extraction, upload one CSV/XLSX source, map the prompt input columns, and work with prompt/model variants as workbook sheets.
 6. For structured PDF extraction, create workbook sheets, name columns in the spreadsheet grid, fill matching question/rules boxes, and run PDFs against the selected sheet.
 7. Choose a model preset.
 8. Provide an OpenAI API key when using OpenAI models.
@@ -83,6 +83,8 @@ data/
 |   `-- <project_id>/
 |       |-- project.json              # Project metadata, including extraction_type
 |       |-- source_files/             # Uploaded CSV/XLSX files and normalized row JSONL for text projects
+|       |-- text_workbook.json         # Frozen text source/mapping selection
+|       |-- text_sheets/               # Ordered prompt/model sheets for the text workbook
 |       |-- structured_sheets/        # Sheet schemas, parsed rows, and parse errors for structured PDF projects
 |       |-- jobs/                     # PDF jobs or text row jobs
 |       |-- *_rq_screening_summary.xlsx
@@ -95,6 +97,8 @@ data/
 These runtime files are not committed.
 
 On startup, existing jobs still under `data/jobs/` are copied into the default `Legacy jobs` project. The migration is idempotent and leaves the original legacy folders in place.
+
+Text projects use a workbook interface after source upload. The project column mapping is frozen and reproduced across every sheet. Each sheet has its own prompt, model configuration, jobs, status counts, and outputs. A sheet locks on its first run; duplicating it copies the configuration immediately to the right without copying jobs or results. The on-screen spreadsheet shows only mapped input columns, while workbook export creates one worksheet per extraction sheet containing every original source column plus CEREBRO result columns.
 
 ## 3. Structured PDF Extraction
 
@@ -124,6 +128,7 @@ The spreadsheet grid is the main schema surface:
 - If imported text would overwrite existing fields or columns, CEREBRO shows one conflict prompt listing all affected items.
 - Structured sheets autosave while editing, so users do not need to click `Save sheet` after every change.
 - A sheet locks when its first structured extraction run is queued. Locked sheets are read-only; users duplicate the sheet to edit the schema without copying extracted rows or parse errors.
+- `Duplicate workbook` creates a new structured PDF project and lets the user choose which sheet schemas to copy. The copy keeps the source description and sheet order, uses the next available `(n)` project name, and does not copy PDFs, jobs, parsed rows, errors, or lock state.
 
 CEREBRO compiles the structured sheet into a strict TSV prompt. The sheet schema is the source of truth: users do not manually write the TSV header. The backend requires the model response to start with the exact configured tab-separated header, parses rows into JSON, preserves raw output, and records parse errors separately.
 
@@ -175,6 +180,8 @@ Optional OpenAI setup:
 ```bash
 export OPENAI_API_KEY="sk-..."
 ```
+
+OpenAI-backed queues allow 15 simultaneous requests by default. Override this when needed with `MAX_OPENAI_CONCURRENT_REQUESTS`.
 
 You can also paste the OpenAI API key into the browser UI, or place it in:
 

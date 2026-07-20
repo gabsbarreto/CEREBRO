@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
@@ -618,6 +618,25 @@ async def create_structured_sheet(
     return JSONResponse({"project": project, "sheet": sheet, "sheets": structured_extraction.list_sheets(str(project["project_id"]))})
 
 
+@app.post("/api/structured/workbook/duplicate")
+async def duplicate_structured_workbook(
+    project_id: str = Form(""),
+    sheet_ids: str = Form(...),
+) -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "pdf_structured")
+    try:
+        parsed_sheet_ids = json.loads(sheet_ids)
+        if not isinstance(parsed_sheet_ids, list) or not all(isinstance(sheet_id, str) for sheet_id in parsed_sheet_ids):
+            raise ValueError("Selected sheet ids must be a JSON list of strings.")
+        payload = structured_extraction.duplicate_workbook(str(project["project_id"]), parsed_sheet_ids)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse(payload)
+
+
 @app.post("/api/structured/sheets/parse-import")
 async def parse_structured_sheet_import(
     project_id: str = Form(""),
@@ -660,6 +679,24 @@ async def get_structured_sheet(sheet_id: str, project_id: str = "") -> JSONRespo
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return JSONResponse({"project": project, "sheet": sheet})
+
+
+@app.get("/api/structured/sheets/{sheet_id}/import-text")
+async def export_structured_sheet_import_text(sheet_id: str, project_id: str = "") -> PlainTextResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "pdf_structured")
+    try:
+        sheet = structured_extraction.get_sheet(str(project["project_id"]), sheet_id)
+        text = structured_extraction.format_sheet_import_text(sheet)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    filename = f"{projects.sanitize_slug(str(sheet.get('name') or sheet_id))}_structured_sheet.txt"
+    return PlainTextResponse(
+        text,
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
 
 
 @app.put("/api/structured/sheets/{sheet_id}")
@@ -893,6 +930,154 @@ async def download_structured_export(project_id: str = "") -> FileResponse:
     )
 
 
+@app.get("/api/text/workbook")
+async def text_workbook(project_id: str = "") -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "text")
+    try:
+        workbook = text_extraction.get_text_workbook(str(project["project_id"]))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse({"project": project, **workbook})
+
+
+@app.post("/api/text/source")
+async def create_text_source(
+    spreadsheet: UploadFile = File(...),
+    project_id: str = Form(""),
+    column_mappings: str = Form("[]"),
+    study_id_column: str = Form(""),
+    rq_model_preset: str = Form("qwen35_9b_8bit_reasoning"),
+    rq_prompt_filename: str = Form(config.DEFAULT_RQ_PROMPT_FILENAME),
+    rq_system_prompt: str = Form(""),
+) -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    active_project_id = str(project["project_id"])
+    ensure_project_type(project, "text")
+    settings = settings_from_form(
+        ocr_dpi=config.DEFAULT_OCR_DPI,
+        ocr_batch_size=config.DEFAULT_OCR_BATCH_SIZE,
+        deepseek_ocr_model_path="",
+        rq_model_preset=rq_model_preset,
+        openai_api_key="",
+        openai_input_mode="ocr_text",
+        rq_prompt_filename=rq_prompt_filename,
+        rq_system_prompt=rq_system_prompt,
+    )
+    try:
+        result = text_extraction.create_text_source(
+            project_id=active_project_id,
+            upload_file=spreadsheet,
+            column_mappings=parse_text_column_mappings(column_mappings),
+            study_id_column=study_id_column,
+            initial_settings=settings,
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Failed to create text extraction source")
+        raise HTTPException(status_code=500, detail=f"Failed to create text extraction source: {exc}")
+    return JSONResponse({"project": project, **result})
+
+
+@app.post("/api/text/sheets")
+async def create_text_sheet(
+    project_id: str = Form(""),
+    name: str = Form(""),
+    rq_model_preset: str = Form("qwen35_9b_8bit_reasoning"),
+    rq_prompt_filename: str = Form(config.DEFAULT_RQ_PROMPT_FILENAME),
+    rq_system_prompt: str = Form(""),
+) -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "text")
+    try:
+        sheet = text_extraction.create_text_sheet(
+            project_id=str(project["project_id"]),
+            name=name,
+            rq_model_preset=rq_model_preset,
+            rq_prompt_filename=rq_prompt_filename,
+            rq_system_prompt=rq_system_prompt,
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse({"project": project, "sheet": sheet, "sheets": text_extraction.list_text_sheets(str(project["project_id"]))})
+
+
+@app.put("/api/text/sheets/{sheet_id}")
+async def update_text_sheet(
+    sheet_id: str,
+    project_id: str = Form(""),
+    name: str = Form(...),
+    rq_model_preset: str = Form("qwen35_9b_8bit_reasoning"),
+    rq_prompt_filename: str = Form(config.DEFAULT_RQ_PROMPT_FILENAME),
+    rq_system_prompt: str = Form(""),
+) -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "text")
+    try:
+        sheet = text_extraction.update_text_sheet(
+            project_id=str(project["project_id"]),
+            sheet_id=sheet_id,
+            name=name,
+            rq_model_preset=rq_model_preset,
+            rq_prompt_filename=rq_prompt_filename,
+            rq_system_prompt=rq_system_prompt,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse({"project": project, "sheet": sheet, "sheets": text_extraction.list_text_sheets(str(project["project_id"]))})
+
+
+@app.post("/api/text/sheets/{sheet_id}/duplicate")
+async def duplicate_text_sheet(sheet_id: str, project_id: str = Form("")) -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "text")
+    try:
+        sheet = text_extraction.duplicate_text_sheet(str(project["project_id"]), sheet_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse({"project": project, "sheet": sheet, "sheets": text_extraction.list_text_sheets(str(project["project_id"]))})
+
+
+@app.post("/api/text/sheets/{sheet_id}/run")
+async def run_text_sheet(
+    sheet_id: str,
+    project_id: str = Form(""),
+    rq_model_preset: str = Form("qwen35_9b_8bit_reasoning"),
+    openai_api_key: str = Form(""),
+    rq_prompt_filename: str = Form(config.DEFAULT_RQ_PROMPT_FILENAME),
+    rq_system_prompt: str = Form(""),
+) -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    active_project_id = str(project["project_id"])
+    ensure_project_type(project, "text")
+    settings = settings_from_form(
+        ocr_dpi=config.DEFAULT_OCR_DPI,
+        ocr_batch_size=config.DEFAULT_OCR_BATCH_SIZE,
+        deepseek_ocr_model_path="",
+        rq_model_preset=rq_model_preset,
+        openai_api_key=openai_api_key,
+        openai_input_mode="ocr_text",
+        rq_prompt_filename=rq_prompt_filename,
+        rq_system_prompt=rq_system_prompt,
+    )
+    try:
+        result = text_extraction.create_text_jobs_for_sheet(
+            project_id=active_project_id,
+            sheet_id=sheet_id,
+            settings=settings,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse({"project": project, **result})
+
+
 @app.post("/api/text/jobs")
 async def create_text_jobs(
     spreadsheet: UploadFile = File(...),
@@ -937,6 +1122,7 @@ async def create_text_jobs(
 @app.get("/api/text/jobs")
 async def list_text_jobs(
     project_id: str = "",
+    sheet_id: str = "",
     offset: int = 0,
     limit: int = 100,
     status: str = "all",
@@ -947,6 +1133,7 @@ async def list_text_jobs(
     try:
         payload = text_extraction.list_text_jobs(
             project_id=str(project["project_id"]),
+            sheet_id=sheet_id,
             offset=offset,
             limit=limit,
             status=status,
@@ -958,11 +1145,11 @@ async def list_text_jobs(
 
 
 @app.get("/api/text/jobs/counts")
-async def text_job_counts(project_id: str = "") -> JSONResponse:
+async def text_job_counts(project_id: str = "", sheet_id: str = "") -> JSONResponse:
     project = selected_project_or_default(project_id)
     ensure_project_type(project, "text")
     try:
-        counts = text_extraction.text_job_counts(str(project["project_id"]))
+        counts = text_extraction.text_job_counts(str(project["project_id"]), sheet_id=sheet_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return JSONResponse({"project": project, "counts": counts, "queue": text_extraction.text_job_queue.status(project_id=str(project["project_id"]))})
@@ -983,22 +1170,22 @@ async def resume_text_queue(project_id: str = Form("")) -> JSONResponse:
 
 
 @app.post("/api/text/jobs/retry-failed")
-async def retry_failed_text_jobs(project_id: str = Form("")) -> JSONResponse:
+async def retry_failed_text_jobs(project_id: str = Form(""), sheet_id: str = Form("")) -> JSONResponse:
     project = selected_project_or_default(project_id)
     ensure_project_type(project, "text")
     try:
-        result = text_extraction.retry_failed_text_jobs(str(project["project_id"]))
+        result = text_extraction.retry_failed_text_jobs(str(project["project_id"]), sheet_id=sheet_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return JSONResponse(result)
 
 
 @app.get("/api/text/jobs/{job_id}/output")
-async def text_job_output(job_id: str, project_id: str = "") -> JSONResponse:
+async def text_job_output(job_id: str, project_id: str = "", sheet_id: str = "") -> JSONResponse:
     project = selected_project_or_default(project_id)
     ensure_project_type(project, "text")
     try:
-        return JSONResponse(text_extraction.read_text_job_output(str(project["project_id"]), job_id))
+        return JSONResponse(text_extraction.read_text_job_output(str(project["project_id"]), job_id, sheet_id=sheet_id))
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
@@ -1006,11 +1193,11 @@ async def text_job_output(job_id: str, project_id: str = "") -> JSONResponse:
 
 
 @app.post("/api/text/jobs/{job_id}/retry")
-async def retry_text_job(job_id: str, project_id: str = Form("")) -> JSONResponse:
+async def retry_text_job(job_id: str, project_id: str = Form(""), sheet_id: str = Form("")) -> JSONResponse:
     project = selected_project_or_default(project_id)
     ensure_project_type(project, "text")
     try:
-        job = text_extraction.retry_text_job(str(project["project_id"]), job_id)
+        job = text_extraction.retry_text_job(str(project["project_id"]), job_id, sheet_id=sheet_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:

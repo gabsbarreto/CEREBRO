@@ -28,22 +28,13 @@ MODEL_PRESETS: dict[str, dict[str, Any]] = {
         "rq_enable_thinking": True,
         "openai_reasoning_effort": "high",
     },
-    "openai_gpt54_nano_xhigh": {
-        "label": "OpenAI gpt-5.4 nano (xhigh reasoning)",
-        "rq_provider": "openai",
-        "rq_screening_model": "gpt-5.4-nano",
-        "rq_max_tokens": config.OPENAI_RQ_SCREENING_MAX_TOKENS,
-        "rq_enable_thinking": True,
-        "openai_reasoning_effort": "xhigh",
-    },
     "openai_gpt54_mini_high": {
-        "label": "OpenAI gpt-5.4 nano (xhigh reasoning)",
+        "label": "OpenAI gpt-5.4 mini (high reasoning)",
         "rq_provider": "openai",
-        "rq_screening_model": "gpt-5.4-nano",
+        "rq_screening_model": "gpt-5.4-mini",
         "rq_max_tokens": config.OPENAI_RQ_SCREENING_MAX_TOKENS,
         "rq_enable_thinking": True,
-        "openai_reasoning_effort": "xhigh",
-        "public": False,
+        "openai_reasoning_effort": "high",
     },
 }
 
