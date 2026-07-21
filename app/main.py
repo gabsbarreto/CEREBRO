@@ -118,20 +118,40 @@ async def new_project_form(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "project_new.html",
-        context={"request": request, "projects": projects.list_projects()},
+        context={
+            "request": request,
+            "projects": projects.list_projects(),
+            "form_values": {"project_name": "", "description": "", "extraction_type": projects.DEFAULT_EXTRACTION_TYPE},
+            "form_error": "",
+        },
     )
 
 
 @app.post("/projects/new")
 async def create_project_form(
+    request: Request,
     project_name: str = Form(...),
     description: str = Form(""),
     extraction_type: str = Form(projects.DEFAULT_EXTRACTION_TYPE),
-) -> RedirectResponse:
+) -> Any:
     try:
         project = projects.create_project(project_name, description, extraction_type)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        return templates.TemplateResponse(
+            request,
+            "project_new.html",
+            context={
+                "request": request,
+                "projects": projects.list_projects(),
+                "form_values": {
+                    "project_name": project_name,
+                    "description": description,
+                    "extraction_type": projects.normalize_extraction_type(extraction_type),
+                },
+                "form_error": str(exc),
+            },
+            status_code=400,
+        )
     return RedirectResponse(url=projects.project_dashboard_path(project), status_code=303)
 
 
@@ -369,11 +389,24 @@ async def get_rq_prompt_file(filename: str) -> JSONResponse:
 
 
 @app.get("/api/jobs")
-async def list_jobs(limit: int = 200, project_id: str = "") -> JSONResponse:
+async def list_jobs(
+    limit: int = 80,
+    offset: int = 0,
+    status: str = "all",
+    search: str = "",
+    project_id: str = "",
+) -> JSONResponse:
     project = selected_project_or_default(project_id)
     active_project_id = str(project["project_id"])
     job_queue.mark_stale_running_jobs_failed(project_id=active_project_id)
-    return JSONResponse({"jobs": jobs.list_jobs(limit=limit, project_id=active_project_id), "project": project})
+    window = jobs.list_jobs_window(
+        project_id=active_project_id,
+        offset=offset,
+        limit=limit,
+        status=status,
+        search=search,
+    )
+    return JSONResponse({"jobs": window["items"], "project": project, **window})
 
 
 @app.get("/api/queue")
@@ -859,15 +892,31 @@ async def create_structured_jobs(
 
 
 @app.get("/api/structured/jobs")
-async def list_structured_jobs(project_id: str = "") -> JSONResponse:
+async def list_structured_jobs(
+    project_id: str = "",
+    sheet_id: str = "",
+    offset: int = 0,
+    limit: int = 80,
+    status: str = "all",
+    search: str = "",
+) -> JSONResponse:
     project = selected_project_or_default(project_id)
     ensure_project_type(project, "pdf_structured")
     job_queue.mark_stale_running_jobs_failed(project_id=str(project["project_id"]))
+    window = structured_extraction.list_structured_jobs_window(
+        str(project["project_id"]),
+        sheet_id=sheet_id,
+        offset=offset,
+        limit=limit,
+        status=status,
+        search=search,
+    )
     return JSONResponse(
         {
             "project": project,
-            "jobs": structured_extraction.list_structured_jobs(str(project["project_id"])),
+            "jobs": window["items"],
             "queue": job_queue.status(project_id=str(project["project_id"])),
+            **window,
         }
     )
 
@@ -978,6 +1027,23 @@ async def create_text_source(
         logger.exception("Failed to create text extraction source")
         raise HTTPException(status_code=500, detail=f"Failed to create text extraction source: {exc}")
     return JSONResponse({"project": project, **result})
+
+
+@app.post("/api/text/source/inspect")
+async def inspect_text_source(
+    spreadsheet: UploadFile = File(...),
+    project_id: str = Form(""),
+) -> JSONResponse:
+    project = selected_project_or_default(project_id)
+    ensure_project_type(project, "text")
+    try:
+        inspection = text_extraction.inspect_spreadsheet_upload(spreadsheet)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Failed to inspect text extraction source")
+        raise HTTPException(status_code=500, detail=f"Failed to inspect spreadsheet: {exc}")
+    return JSONResponse({"project": project, **inspection})
 
 
 @app.post("/api/text/sheets")

@@ -84,8 +84,12 @@
               <p class="eyebrow">PDF intake</p>
               <h2>Upload and run structured extraction</h2>
             </div>
-            <span class="panel-kicker">PDF to TSV rows</span>
+            <div class="actions">
+              <span class="panel-kicker">PDF to TSV rows</span>
+              <button id="toggleStructuredSetupButton" class="secondary-button" type="button" aria-expanded="true" aria-controls="structuredSetupBody">Hide setup</button>
+            </div>
           </div>
+          <div id="structuredSetupBody">
           <div class="grid">
             <div class="file-picker upload-card">
               <span class="file-picker-label">PDF files</span>
@@ -156,8 +160,12 @@
             </div>
           </div>
           <div class="form-footer">
-            <div id="structuredStatusLine" class="queue-hint">Complete the sheet schema, then upload PDFs.</div>
+            <div>
+              <div id="structuredStatusLine" class="queue-hint">Complete the sheet schema, then upload PDFs.</div>
+              <div class="queue-hint">The selected sheet schema becomes read-only as soon as its first job is queued.</div>
+            </div>
             <button id="runStructuredButton" type="submit">Run structured extraction</button>
+          </div>
           </div>
         </form>
       </section>
@@ -170,6 +178,7 @@
             <p id="sheetFormStatus" class="section-subtitle">Name columns in the table, then fill the matching question and rules boxes.</p>
           </div>
           <div class="actions">
+            <button id="toggleStructuredSchemaButton" class="secondary-button" type="button" aria-expanded="true">Hide schema details</button>
             <button id="saveSheetButton" type="button">Save sheet</button>
             <button id="duplicateSheetButton" type="button">Duplicate sheet</button>
             <button id="duplicateWorkbookButton" type="button">Duplicate workbook</button>
@@ -188,6 +197,7 @@
           </button>
         </div>
 
+        <div id="structuredSchemaFields">
         <form id="sheetForm" class="sheet-form workbook-sheet-form">
           <label class="field sheet-name-field">
             <span>Sheet name</span>
@@ -204,6 +214,7 @@
             </label>
           </div>
         </form>
+        </div>
 
         <div class="section-head compact structured-spreadsheet-head">
           <div>
@@ -235,6 +246,7 @@
           </button>
         </div>
 
+        <div id="structuredColumnInstructions">
         <div class="column-editor-head structured-column-instructions-head">
           <div>
             <p class="eyebrow">Column instructions</p>
@@ -252,6 +264,7 @@
           <summary>Generated prompt preview</summary>
           <pre id="compiledPromptPreview"></pre>
         </details>
+        </div>
       </section>
 
       <section class="panel structured-errors-panel">
@@ -262,7 +275,20 @@
           </div>
           <button id="refreshStructuredButton" type="button">Refresh</button>
         </div>
-        <div id="structuredJobsList" class="structured-jobs-list"></div>
+        <p id="structuredJobsSummary" class="filter-summary">No structured jobs for this sheet.</p>
+        <div id="structuredJobsTableShell" class="structured-job-table-shell" role="grid" aria-label="Structured PDF jobs" aria-rowcount="0">
+          <div id="structuredJobsHeader" class="structured-job-table-header" role="row">
+            <span role="columnheader">Source PDF</span>
+            <span role="columnheader">Job status</span>
+            <span role="columnheader">Parse status</span>
+            <span role="columnheader">Model</span>
+            <span role="columnheader">Action</span>
+          </div>
+          <div id="structuredJobsList" class="structured-job-viewport" tabindex="0">
+            <div id="structuredJobsSpacer" class="structured-job-virtual-spacer"></div>
+            <div id="structuredJobsRows" class="structured-job-virtual-rows"></div>
+          </div>
+        </div>
       </section>
     </main>
 
@@ -354,6 +380,7 @@
     <input id="currentProjectId" type="hidden" value="{{ current_project.project_id }}" />
     <script id="projectData" type="application/json">{{ projects | tojson }}</script>
     <script id="modelPresetData" type="application/json">{{ model_presets | tojson }}</script>
-    <script src="/static/structured_pdf.js?v=20260720-workbook-duplicate"></script>
+    <script src="/static/ui_helpers.js?v=20260720-usability"></script>
+    <script src="/static/structured_pdf.js?v=20260720-usability"></script>
   </body>
 </html>

@@ -18,6 +18,13 @@ const pdfInputSummary = document.querySelector("#pdfInputSummary");
 const folderInputSummary = document.querySelector("#folderInputSummary");
 const queuePanel = document.querySelector("#queuePanel");
 const queueList = document.querySelector("#queueList");
+const queueSummary = document.querySelector("#queueSummary");
+const pdfJobTableShell = document.querySelector("#pdfJobTableShell");
+const pdfJobTableHeader = document.querySelector("#pdfJobTableHeader");
+const pdfJobVirtualSpacer = document.querySelector("#pdfJobVirtualSpacer");
+const pdfJobVirtualRows = document.querySelector("#pdfJobVirtualRows");
+const togglePdfSetupButton = document.querySelector("#togglePdfSetupButton");
+const pdfSetupBody = document.querySelector("#pdfSetupBody");
 const batchSummaryLine = document.querySelector("#batchSummaryLine");
 const batchStats = document.querySelector("#batchStats");
 const activeJobsPanel = document.querySelector("#activeJobsPanel");
@@ -56,19 +63,24 @@ const projectsFlyout = document.querySelector("#projectsFlyout");
 const currentProjectNameLabel = document.querySelector("#currentProjectName");
 const initialProjects = JSON.parse(document.querySelector("#projectData")?.textContent || "[]");
 const modelPresets = JSON.parse(document.querySelector("#modelPresetData")?.textContent || "[]");
-const JOB_LIST_LIMIT = 0;
+const JOB_LIST_LIMIT = 80;
+const PDF_JOB_ROW_HEIGHT = 76;
+const PDF_JOB_OVERSCAN = 8;
 
 let pollTimer = null;
-let refreshTimer = null;
 let currentJobId = null;
 let trackedJobs = new Map();
-let expandedJobIds = new Set();
-let inlineResultCache = new Map();
+let activeJobRecords = [];
+let jobWindow = { offset: -1, limit: JOB_LIST_LIMIT, total: 0, items: [] };
+let jobCounts = { all: 0, running: 0, queued: 0, completed: 0, failed: 0 };
 let queueState = { paused: false, current_job_id: null, pending_job_ids: [], pending_count: 0 };
 let activeStatusFilter = "all";
 let jobSearchQuery = "";
+let jobSearchTimer = null;
+let jobWindowRequestKey = "";
 let lastSuccessfulRefreshAt = null;
 let lastUpdatedTimer = null;
+let currentPollingCadence = "waiting for first update";
 
 document.addEventListener("DOMContentLoaded", () => {
   initializeProjectSidebar();
@@ -110,27 +122,46 @@ if (refreshQueueButton) {
 }
 
 for (const button of jobFilterButtons) {
-  button.addEventListener("click", () => {
+  button.addEventListener("click", async () => {
     activeStatusFilter = button.dataset.jobFilter || "all";
-    renderQueue();
+    queueList.scrollTop = 0;
+    await loadPdfJobWindow(0, { force: true });
   });
 }
 
 if (jobSearchInput) {
   jobSearchInput.addEventListener("input", () => {
-    jobSearchQuery = jobSearchInput.value || "";
-    renderQueue();
+    window.clearTimeout(jobSearchTimer);
+    jobSearchTimer = window.setTimeout(async () => {
+      jobSearchQuery = jobSearchInput.value || "";
+      queueList.scrollTop = 0;
+      await loadPdfJobWindow(0, { force: true });
+    }, 250);
   });
 }
 
 if (clearJobSearchButton) {
-  clearJobSearchButton.addEventListener("click", () => {
+  clearJobSearchButton.addEventListener("click", async () => {
     jobSearchQuery = "";
     if (jobSearchInput) jobSearchInput.value = "";
-    renderQueue();
+    queueList.scrollTop = 0;
+    await loadPdfJobWindow(0, { force: true });
     jobSearchInput?.focus();
   });
 }
+
+queueList?.addEventListener("scroll", () => {
+  pdfJobTableHeader.style.transform = `translateX(${-queueList.scrollLeft}px)`;
+  window.requestAnimationFrame(() => loadPdfJobWindow(pdfVisibleOffset()));
+});
+
+document.addEventListener("visibilitychange", () => {
+  schedulePdfPolling(document.hidden ? 30000 : 0);
+});
+
+togglePdfSetupButton?.addEventListener("click", () => {
+  setPdfSetupCollapsed(!pdfSetupBody.classList.contains("hidden"));
+});
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -207,12 +238,19 @@ copyButton.addEventListener("click", async () => {
 });
 
 pauseButton.addEventListener("click", async () => {
+  const confirmed = await CEREBROUI.confirm({
+    title: "Pause all PDF processing",
+    message: "This shared control pauses standard and structured PDF jobs across every project.",
+    details: ["Active PDF workers may be interrupted and returned to the queue."],
+    confirmLabel: "Pause all PDF processing",
+  });
+  if (!confirmed) return;
   pauseButton.disabled = true;
   try {
     const response = await fetch("/api/queue/pause", { method: "POST", body: buildProjectFormData() });
     const payload = await response.json().catch(() => ({}));
     if (response.ok) queueState = payload;
-    setStatus("Queue paused. Active worker is being interrupted.", 0, "queued");
+    setStatus("All PDF processing paused. Active workers are being returned to the shared queue.", 0, "queued");
     renderQueue();
     startPolling();
     await pollAllStatuses();
@@ -224,10 +262,12 @@ pauseButton.addEventListener("click", async () => {
 resumeButton.addEventListener("click", async () => {
   resumeButton.disabled = true;
   try {
-    const response = await fetch("/api/queue/resume", { method: "POST", body: buildSettingsFormData() });
+    const body = buildProjectFormData();
+    body.append("preserve_settings", "true");
+    const response = await fetch("/api/queue/resume", { method: "POST", body });
     const payload = await response.json().catch(() => ({}));
     if (response.ok) queueState = payload;
-    setStatus("Queue resumed with the selected model preset.", 0, "running");
+    setStatus("All PDF processing resumed with each job's saved settings.", 0, "running");
     renderQueue();
     startPolling();
     await pollAllStatuses();
@@ -264,7 +304,13 @@ cleanQueueButton.addEventListener("click", async () => {
     updateDashboardControls();
     return;
   }
-  if (!window.confirm("Remove all queued jobs from the queue and jobs list? Completed and failed jobs will be kept.")) {
+  const confirmed = await CEREBROUI.confirm({
+    title: "Remove pending jobs",
+    message: "Remove pending PDF jobs from this project? Completed, failed, and running jobs will be kept.",
+    confirmLabel: "Remove pending jobs",
+    danger: true,
+  });
+  if (!confirmed) {
     return;
   }
   cleanQueueButton.disabled = true;
@@ -472,15 +518,16 @@ function renderPromptPicker(prompts) {
       </div>
     </div>
   `;
-  overlay.querySelector("[data-action='cancel']").addEventListener("click", () => overlay.remove());
+  overlay.querySelector("[data-action='cancel']").addEventListener("click", () => CEREBROUI.hideDialog(overlay));
   overlay.querySelectorAll(".prompt-choice").forEach((button) => {
     button.addEventListener("click", async () => {
       const filename = button.dataset.filename;
-      overlay.remove();
+      CEREBROUI.hideDialog(overlay);
       await loadPromptTemplate(filename);
     });
   });
   document.body.appendChild(overlay);
+  CEREBROUI.showDialog(overlay, { removeOnClose: true, closeOnBackdrop: true });
 }
 
 function syncSystemPromptField() {
@@ -586,74 +633,87 @@ function displayJobFilename(job) {
 }
 
 function askOverwriteDuplicates(duplicates) {
-  return new Promise((resolve) => {
-    const overlay = document.createElement("div");
-    overlay.className = "modal-overlay";
-    const names = duplicates.map((item) => `${item.filename}\n${item.prompt_filename || ""} | ${item.model || ""}`).slice(0, 8);
-    const extra = duplicates.length > names.length ? `\n...and ${duplicates.length - names.length} more` : "";
-    overlay.innerHTML = `
-      <div class="modal">
-        <p>These PDFs already have decisions with the same prompt and model.</p>
-        <pre>${escapeHtml(names.join("\n\n") + extra)}</pre>
-        <p>Overwrite decisions and reuse OCR?</p>
-        <div class="modal-actions">
-          <button type="button" data-answer="yes">Yes</button>
-          <button type="button" data-answer="no">No</button>
-        </div>
-      </div>
-    `;
-    overlay.querySelector("[data-answer='yes']").addEventListener("click", () => {
-      overlay.remove();
-      resolve(true);
-    });
-    overlay.querySelector("[data-answer='no']").addEventListener("click", () => {
-      overlay.remove();
-      resolve(false);
-    });
-    document.body.appendChild(overlay);
+  const names = duplicates.map((item) => `${item.filename} (${item.prompt_filename || "prompt not recorded"} | ${item.model || "model not recorded"})`).slice(0, 8);
+  if (duplicates.length > names.length) names.push(`...and ${duplicates.length - names.length} more`);
+  return CEREBROUI.confirm({
+    title: "Duplicate PDF decisions found",
+    message: "Overwrite matching decisions and reuse existing OCR where possible? Choose Cancel to queue only new PDFs.",
+    details: names,
+    confirmLabel: "Overwrite duplicates",
   });
 }
 
 function startPolling() {
-  if (pollTimer) return;
-  pollAllStatuses();
-  pollTimer = window.setInterval(pollAllStatuses, 1500);
+  schedulePdfPolling(0);
 }
 
 function startQueueRefresh() {
-  if (refreshTimer) return;
-  refreshTimer = window.setInterval(restoreQueueFromJobList, 10000);
+  schedulePdfPolling();
+}
+
+function schedulePdfPolling(delay = null) {
+  window.clearTimeout(pollTimer);
+  const hasActiveWork = pdfQueueHasActiveWork();
+  const cadenceDelay = document.hidden ? 30000 : hasActiveWork ? 1500 : 15000;
+  const nextDelay = delay ?? cadenceDelay;
+  pollTimer = window.setTimeout(async () => {
+    await restoreQueueFromJobList({ schedule: false });
+    schedulePdfPolling();
+  }, nextDelay);
+  updatePollingLabel(hasActiveWork, cadenceDelay);
+}
+
+function pdfQueueHasActiveWork() {
+  return Boolean(
+    jobCounts.running ||
+    jobCounts.queued ||
+    queueState.current_job_id ||
+    (queueState.current_job_ids || []).length ||
+    queueState.pending_count ||
+    queueState.openai_running_count ||
+    queueState.openai_pending_count
+  );
+}
+
+function updatePollingLabel(active, delay) {
+  if (!autoRefreshStatus) return;
+  currentPollingCadence = document.hidden
+    ? `background checks every ${Math.round(delay / 1000)}s`
+    : active
+      ? `live updates every ${delay / 1000}s`
+      : `idle checks every ${Math.round(delay / 1000)}s`;
+  updateLastUpdatedDisplay();
 }
 
 function mergeJobRecords(records) {
   for (const record of records) {
     const existing = trackedJobs.get(record.job_id) || {};
-    const status = record.status || {};
-    const metadata = record.metadata || {};
-    trackedJobs.set(record.job_id, {
-      ...existing,
-      job_id: record.job_id,
-      filename: record.filename || metadata.original_filename || record.job_id,
-      metadata,
-      prompt_filename: metadata.rq_prompt_filename || record.prompt_filename || "",
-      model: metadata.rq_screening_model || record.model || "",
-      openai_input_mode: metadata.openai_input_mode || record.openai_input_mode || existing.openai_input_mode || "",
-      created_at: metadata.created_at || record.created_at || existing.created_at || "",
-      completed_at: metadata.completed_at || record.completed_at || existing.completed_at || "",
-      job_dir: record.job_dir || existing.job_dir || "",
-      ...status,
-    });
+    trackedJobs.set(record.job_id, normalizeJobRecord(record, existing));
   }
 }
 
-async function restoreQueueFromJobList() {
+function normalizeJobRecord(record, existing = {}) {
+  const status = record.status || {};
+  const metadata = record.metadata || {};
+  return {
+    ...existing,
+    job_id: record.job_id,
+    filename: record.filename || metadata.original_filename || record.job_id,
+    metadata,
+    prompt_filename: metadata.rq_prompt_filename || record.prompt_filename || "",
+    model: metadata.rq_screening_model || record.model || "",
+    openai_input_mode: metadata.openai_input_mode || record.openai_input_mode || existing.openai_input_mode || "",
+    created_at: metadata.created_at || record.created_at || existing.created_at || "",
+    completed_at: metadata.completed_at || record.completed_at || existing.completed_at || "",
+    job_dir: record.job_dir || existing.job_dir || "",
+    ...status,
+  };
+}
+
+async function restoreQueueFromJobList(options = {}) {
   try {
     await loadQueueState();
-    const response = await fetch(withProject(`/api/jobs?limit=${JOB_LIST_LIMIT}`));
-    if (!response.ok) return;
-    const payload = await response.json();
-    trackedJobs.clear();
-    mergeJobRecords((payload.jobs || []).reverse());
+    await loadPdfJobWindow(jobWindow.offset >= 0 ? jobWindow.offset : 0, { force: true, render: false });
     markLastUpdated();
     renderQueue();
     const active = pickActiveJob();
@@ -661,49 +721,23 @@ async function restoreQueueFromJobList() {
       currentJobId = active.job_id;
       setStages(active.stage);
     }
-    if ([...trackedJobs.values()].some((job) => job.status === "queued" || job.status === "running")) {
-      startPolling();
+    if (jobCounts.all && !pdfSetupBody.classList.contains("setup-initialized")) {
+      setPdfSetupCollapsed(true);
+      pdfSetupBody.classList.add("setup-initialized");
     }
-    startQueueRefresh();
+    if (options.schedule !== false) schedulePdfPolling();
   } catch (_error) {
     return;
   }
 }
 
 async function pollAllStatuses() {
-  if (!trackedJobs.size) return;
-  await loadQueueState();
-  const entries = [...trackedJobs.values()].filter((job) => job.status === "queued" || job.status === "running");
-  await Promise.all(
-    entries.map(async (job) => {
-      try {
-        const response = await fetch(withProject(`/api/jobs/${job.job_id}/status`));
-        if (!response.ok) return;
-        const status = await response.json();
-        trackedJobs.set(job.job_id, { ...job, ...status });
-      } catch (_error) {
-        return;
-      }
-    })
-  );
-
-  renderQueue();
-  markLastUpdated();
-  const active = pickActiveJob();
-  if (active) {
-    currentJobId = active.job_id;
-    setStages(active.stage);
-  }
-
-  const allDone = [...trackedJobs.values()].every((job) => job.status === "complete" || job.status === "failed");
-  if (allDone) {
-    window.clearInterval(pollTimer);
-    pollTimer = null;
-  }
+  await restoreQueueFromJobList({ schedule: false });
+  schedulePdfPolling();
 }
 
 function pickActiveJob() {
-  const jobs = [...trackedJobs.values()];
+  const jobs = [...activeJobRecords, ...trackedJobs.values()];
   return (
     jobs.find((job) => job.status === "running") ||
     jobs.find((job) => job.status === "queued") ||
@@ -714,7 +748,47 @@ function pickActiveJob() {
 }
 
 function countByStatus(status) {
-  return [...trackedJobs.values()].filter((job) => job.status === status).length;
+  const key = status === "complete" ? "completed" : status;
+  return Number(jobCounts[key] || 0);
+}
+
+async function loadPdfJobWindow(offset = pdfVisibleOffset(), options = {}) {
+  const safeOffset = Math.max(0, Number(offset || 0));
+  const key = `${safeOffset}:${activeStatusFilter}:${jobSearchQuery}`;
+  if (!options.force && key === jobWindowRequestKey) return;
+  if (!options.force && jobWindow.offset <= safeOffset && safeOffset < jobWindow.offset + Math.max(1, jobWindow.limit - 30)) return;
+  jobWindowRequestKey = key;
+  const params = new URLSearchParams({
+    project_id: currentProjectId,
+    offset: String(safeOffset),
+    limit: String(JOB_LIST_LIMIT),
+    status: activeStatusFilter,
+    search: jobSearchQuery,
+  });
+  const response = await fetch(`/api/jobs?${params.toString()}`);
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.detail || "Could not load project jobs.");
+  trackedJobs.clear();
+  mergeJobRecords(payload.items || payload.jobs || []);
+  jobWindow = {
+    offset: Number(payload.offset || 0),
+    limit: Number(payload.limit || JOB_LIST_LIMIT),
+    total: Number(payload.total || 0),
+    items: [...trackedJobs.values()],
+  };
+  jobCounts = { ...jobCounts, ...(payload.counts || {}) };
+  activeJobRecords = (payload.active_items || []).map((record) => normalizeJobRecord(record));
+  if (options.render !== false) renderQueue();
+}
+
+function pdfVisibleOffset() {
+  return Math.max(0, Math.floor((queueList?.scrollTop || 0) / PDF_JOB_ROW_HEIGHT) - PDF_JOB_OVERSCAN);
+}
+
+function setPdfSetupCollapsed(collapsed) {
+  pdfSetupBody?.classList.toggle("hidden", collapsed);
+  togglePdfSetupButton?.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  if (togglePdfSetupButton) togglePdfSetupButton.textContent = collapsed ? "Configure new run" : "Hide setup";
 }
 
 function startLastUpdatedTimer() {
@@ -731,12 +805,12 @@ function markLastUpdated() {
 function updateLastUpdatedDisplay() {
   if (!autoRefreshStatus) return;
   if (!lastSuccessfulRefreshAt) {
-    autoRefreshStatus.textContent = "Auto-refreshing · Waiting for first update";
+    autoRefreshStatus.textContent = `Auto-refreshing · ${currentPollingCadence}`;
     return;
   }
   const seconds = Math.max(0, Math.floor((Date.now() - lastSuccessfulRefreshAt.getTime()) / 1000));
   const relative = seconds < 5 ? "just now" : `${relativeSeconds(seconds)} ago`;
-  autoRefreshStatus.textContent = `Auto-refreshing · Last updated ${relative}`;
+  autoRefreshStatus.textContent = `Auto-refreshing · ${currentPollingCadence} · Last updated ${relative}`;
 }
 
 function relativeSeconds(seconds) {
@@ -759,16 +833,14 @@ function dashboardStatus(job) {
 }
 
 function dashboardCounts() {
-  const counts = { total: trackedJobs.size, complete: 0, running: 0, queued: 0, failed: 0, other: 0 };
-  for (const job of trackedJobs.values()) {
-    const status = dashboardStatus(job);
-    if (Object.prototype.hasOwnProperty.call(counts, status)) {
-      counts[status] += 1;
-    } else {
-      counts.other += 1;
-    }
-  }
-  return counts;
+  return {
+    total: Number(jobCounts.all || 0),
+    complete: Number(jobCounts.completed || 0),
+    running: Number(jobCounts.running || 0),
+    queued: Number(jobCounts.queued || 0),
+    failed: Number(jobCounts.failed || 0),
+    other: 0,
+  };
 }
 
 function filterStatusKey(job) {
@@ -781,14 +853,13 @@ function filterStatusKey(job) {
 }
 
 function filterCounts() {
-  const counts = { all: trackedJobs.size, running: 0, queued: 0, completed: 0, failed: 0 };
-  for (const job of trackedJobs.values()) {
-    const key = filterStatusKey(job);
-    if (Object.prototype.hasOwnProperty.call(counts, key)) {
-      counts[key] += 1;
-    }
-  }
-  return counts;
+  return {
+    all: Number(jobCounts.all || 0),
+    running: Number(jobCounts.running || 0),
+    queued: Number(jobCounts.queued || 0),
+    completed: Number(jobCounts.completed || 0),
+    failed: Number(jobCounts.failed || 0),
+  };
 }
 
 function jobMatchesDashboardFilters(job) {
@@ -823,7 +894,7 @@ function renderFilterControls(visibleCount) {
   if (filterSummaryLine) {
     const searchText = jobSearchQuery.trim() ? ` matching "${jobSearchQuery.trim()}"` : "";
     const filterText = activeStatusFilter === "all" ? "all jobs" : `${activeStatusFilter} jobs`;
-    filterSummaryLine.textContent = `Showing ${visibleCount} of ${counts.all} ${filterText}${searchText}.`;
+    filterSummaryLine.textContent = `${Number(visibleCount).toLocaleString()} ${filterText}${searchText}. Only visible rows are loaded.`;
   }
 }
 
@@ -1095,7 +1166,7 @@ function updateBatchStatus(counts) {
 function renderActiveJobs() {
   if (!activeJobsList || !activeJobsPanel) return;
   const activeIds = activeJobIds();
-  const activeJobs = orderedJobsForRender().filter((job) => activeIds.has(job.job_id) || dashboardStatus(job) === "running");
+  const activeJobs = activeJobRecords.filter((job) => activeIds.has(job.job_id) || ["running", "queued"].includes(dashboardStatus(job)));
   if (!activeJobs.length) {
     activeJobsList.innerHTML = `
       <div class="empty-state">
@@ -1209,219 +1280,109 @@ function orderedJobsForRender() {
 }
 
 function renderQueue() {
-  const viewState = captureInlineViewState();
-  const pageScroll = { x: window.scrollX, y: window.scrollY };
   renderBatchDashboard();
-  if (!trackedJobs.size) {
-    queuePanel.classList.remove("hidden");
-    renderFilterControls(0);
-    queueList.innerHTML = `
-      <div class="empty-state">
-        <strong>No files in the queue.</strong>
-        <span>Upload PDFs and add them to the queue to start tracking batch progress.</span>
-      </div>
-    `;
-    return;
-  }
   queuePanel.classList.remove("hidden");
-  queueList.innerHTML = "";
-  const summary = document.createElement("div");
-  summary.className = "queue-summary cockpit-summary";
   const ocrPending = queueState.pending_count || 0;
   const openaiPending = queueState.openai_pending_count || 0;
   const openaiRunning = queueState.openai_running_count || 0;
   const ocrRunning = (queueState.current_job_ids || []).length || (queueState.current_job_id ? 1 : 0);
-  summary.innerHTML = `
-    <span>${queueState.paused ? "Queue paused" : "Queue running"}</span>
+  queueSummary.innerHTML = `
+    <span>${queueState.paused ? "Shared PDF queue paused" : "Shared PDF queue running"}</span>
     <span>OCR/local: ${escapeHtml(ocrRunning)} running, ${escapeHtml(ocrPending)} queued</span>
     <span>OpenAI: ${escapeHtml(openaiRunning)} running, ${escapeHtml(openaiPending)} queued</span>
   `;
-  queueList.appendChild(summary);
-  const jobsToRender = orderedJobsForRender().filter(jobMatchesDashboardFilters);
-  renderFilterControls(jobsToRender.length);
-  if (!jobsToRender.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty-state";
-    empty.innerHTML = `
-      <strong>No jobs match the current filters.</strong>
-      <span>Adjust the status filter or filename search to broaden the list.</span>
+  renderFilterControls(jobWindow.total);
+  pdfJobTableShell?.setAttribute("aria-rowcount", String(jobWindow.total));
+  pdfJobVirtualSpacer.style.height = `${Math.max(1, jobWindow.total) * PDF_JOB_ROW_HEIGHT}px`;
+  pdfJobVirtualRows.innerHTML = "";
+  if (!jobWindow.total) {
+    pdfJobVirtualSpacer.style.height = "160px";
+    pdfJobVirtualRows.innerHTML = `
+      <div class="pdf-job-empty">
+        <strong>${jobCounts.all ? "No jobs match the current filters." : "No project jobs yet."}</strong>
+        <span>${jobCounts.all ? "Adjust the status filter or filename search." : "Upload PDFs to create the first extraction run."}</span>
+      </div>
     `;
-    queueList.appendChild(empty);
+    return;
   }
-  for (const job of jobsToRender) {
+  jobWindow.items.forEach((job, index) => {
+    const rowIndex = jobWindow.offset + index;
     const row = document.createElement("div");
     const status = dashboardStatus(job);
     const isActive = status === "queued" || status === "running";
     const promptName = job.prompt_filename || job.metadata?.rq_prompt_filename || "";
     const modelName = job.model || job.metadata?.rq_screening_model || "";
-    const mode = jobMode(job);
     const timeText = jobTimeText(job);
-    const errorText = status === "failed" ? job.error || job.message || "" : "";
-    row.className = `queue-row file-job-card ${cssToken(status)} ${mode.className}`;
+    row.className = `pdf-job-data-row ${cssToken(status)}`;
+    row.style.transform = `translateY(${rowIndex * PDF_JOB_ROW_HEIGHT}px)`;
+    row.setAttribute("role", "row");
     row.innerHTML = `
-      <div class="queue-file">
-        <div class="queue-file-title">${escapeHtml(displayJobFilename(job))}</div>
-        <div class="queue-file-meta">${escapeHtml([promptName, modelName].filter(Boolean).join(" | "))}</div>
-        ${timeText ? `<div class="queue-file-meta">${escapeHtml(timeText)}</div>` : ""}
+      <div class="pdf-job-cell pdf-job-file" role="gridcell" title="${escapeAttribute(displayJobFilename(job))}">
+        <strong>${escapeHtml(displayJobFilename(job))}</strong>
+        <small>${escapeHtml(job.job_id)}</small>
       </div>
-      <div class="queue-route">
-        <span class="mode-badge ${mode.className}">${escapeHtml(mode.label)}</span>
-        <small>${escapeHtml(mode.detail)}</small>
-      </div>
-      <div class="queue-stage">
+      <div class="pdf-job-cell pdf-job-status" role="gridcell">
         <span class="status-badge ${cssToken(status)}">${escapeHtml(statusBadgeLabel(job))}</span>
-        <strong>${escapeHtml(friendlyStage(job))}</strong>
-        <p>${escapeHtml(job.message || "")}</p>
-        <div class="job-progress">${renderJobProgress(job)}</div>
+        <small title="${escapeAttribute(job.message || friendlyStage(job))}">${escapeHtml(friendlyStage(job))}</small>
       </div>
-      <div class="queue-pathway">${renderPipeline(job)}</div>
-      ${errorText ? `<div class="queue-error">${escapeHtml(errorText)}</div>` : ""}
-      <div class="queue-row-actions">
-        <button type="button" data-action="view" ${status === "complete" ? "" : "disabled"}>${expandedJobIds.has(job.job_id) ? "Hide" : "View"}</button>
+      <div class="pdf-job-cell pdf-job-model" role="gridcell" title="${escapeAttribute([modelName, promptName].filter(Boolean).join(" | "))}">
+        <strong>${escapeHtml(modelName || "Model not recorded")}</strong>
+        <small>${escapeHtml(promptName || "Prompt not recorded")}</small>
+      </div>
+      <div class="pdf-job-cell pdf-job-time" role="gridcell"><span>${escapeHtml(timeText || "Not started")}</span></div>
+      <div class="pdf-job-cell queue-row-actions" role="gridcell">
+        <button type="button" data-action="view" ${status === "complete" ? "" : "disabled"}>View</button>
         <button type="button" data-action="rerun" ${isActive ? "disabled" : ""}>Rerun</button>
         <button type="button" data-action="delete" ${isActive ? "disabled" : ""}>Delete</button>
       </div>
     `;
-    row.querySelector("[data-action='view']").addEventListener("click", async () => {
-      await toggleInlineResult(job);
-    });
+    row.querySelector("[data-action='view']").addEventListener("click", (event) => showPdfResultInspector(job, event.currentTarget));
     row.querySelector("[data-action='rerun']").addEventListener("click", async () => {
       await rerunJob(job);
     });
     row.querySelector("[data-action='delete']").addEventListener("click", async () => {
       await deleteJob(job);
     });
-    queueList.appendChild(row);
-    if (expandedJobIds.has(job.job_id)) {
-      queueList.appendChild(renderInlineResult(job));
-    }
-  }
-  restoreInlineViewState(viewState);
-  window.requestAnimationFrame(() => window.scrollTo(pageScroll.x, pageScroll.y));
+    pdfJobVirtualRows.appendChild(row);
+  });
 }
 
-async function toggleInlineResult(job) {
-  currentJobId = job.job_id;
-  resultPanel.classList.add("hidden");
-  if (expandedJobIds.has(job.job_id)) {
-    expandedJobIds.delete(job.job_id);
-    renderQueue();
-    return;
-  }
-  expandedJobIds.add(job.job_id);
-  if (!inlineResultCache.has(job.job_id)) {
-    inlineResultCache.set(job.job_id, { loading: true });
-    renderQueue();
-    await fetchInlineResult(job.job_id);
-  }
-  renderQueue();
-}
-
-async function fetchInlineResult(jobId) {
+async function showPdfResultInspector(job, trigger) {
+  const inspector = CEREBROUI.openInspector({
+    kicker: "PDF extraction result",
+    title: displayJobFilename(job),
+    subtitle: job.job_id,
+    trigger,
+  });
   try {
-    const response = await fetch(withProject(`/api/jobs/${jobId}/result`));
+    const response = await fetch(withProject(`/api/jobs/${encodeURIComponent(job.job_id)}/result`));
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(payload.detail || "Result is not available.");
-    }
-    inlineResultCache.set(jobId, { loading: false, payload });
-  } catch (error) {
-    inlineResultCache.set(jobId, { loading: false, error: error.message || "Could not load result." });
-  }
-}
-
-function renderInlineResult(job) {
-  const panel = document.createElement("div");
-  panel.className = "inline-result";
-  panel.dataset.jobId = job.job_id;
-  const cached = inlineResultCache.get(job.job_id);
-  if (!cached || cached.loading) {
-    panel.innerHTML = `<p class="inline-result-status">Loading result...</p>`;
-    return panel;
-  }
-  if (cached.error) {
-    panel.innerHTML = `<p class="inline-result-status error">${escapeHtml(cached.error)}</p>`;
-    return panel;
-  }
-
-  const payload = cached.payload || {};
-  const metadata = payload.metadata || {};
-  const output = payload.output || "";
-  panel.innerHTML = `
-    <div class="inline-result-head">
-      <div>
-        <h3>Result</h3>
-        <p>${escapeHtml(displayJobFilename(metadata.original_filename || job.filename || job.job_id))}</p>
-      </div>
-      <div class="actions">
-        <button type="button" data-action="copy-inline">Copy result</button>
+    if (!response.ok) throw new Error(payload.detail || "Result is not available.");
+    const metadata = payload.metadata || {};
+    const output = payload.output || "";
+    inspector.setContent(`
+      <div class="inspector-actions">
+        <button type="button" data-inspector-copy>Copy result</button>
         <a class="button" href="${withProject(`/api/jobs/${encodeURIComponent(job.job_id)}/download`)}">Download .md</a>
       </div>
-    </div>
-    <dl class="metadata-list compact inline-metadata">
-      <div><dt>Job</dt><dd>${escapeHtml(job.job_id)}</dd></div>
-      <div><dt>Model</dt><dd>${escapeHtml(metadata.rq_screening_model || "")}</dd></div>
-      <div><dt>Pages</dt><dd>${escapeHtml(metadata.number_of_pages || "")}</dd></div>
-      <div><dt>Warnings</dt><dd>${escapeHtml((metadata.warnings || []).join("; ") || "None")}</dd></div>
-    </dl>
-    <textarea class="inline-result-text" spellcheck="false" readonly>${escapeHtml(output)}</textarea>
-    <details>
-      <summary>View merged OCR text</summary>
-      <pre>${escapeHtml(payload.merged_full_text || "")}</pre>
-    </details>
-    <details>
-      <summary>View prompt sent to model</summary>
-      <pre>${escapeHtml(payload.prompt || "")}</pre>
-    </details>
-    <details>
-      <summary>View metadata</summary>
-      <pre>${escapeHtml(JSON.stringify(metadata, null, 2))}</pre>
-    </details>
-  `;
-  panel.querySelector("[data-action='copy-inline']").addEventListener("click", async (event) => {
-    const button = event.currentTarget;
-    await navigator.clipboard.writeText(output);
-    button.textContent = "Copied";
-    window.setTimeout(() => {
-      button.textContent = "Copy result";
-    }, 1200);
-  });
-  return panel;
-}
-
-function captureInlineViewState() {
-  const state = new Map();
-  document.querySelectorAll(".inline-result[data-job-id]").forEach((panel) => {
-    const jobId = panel.dataset.jobId;
-    if (!jobId) return;
-    const textarea = panel.querySelector(".inline-result-text");
-    const details = [...panel.querySelectorAll("details")];
-    const preBlocks = [...panel.querySelectorAll("pre")];
-    state.set(jobId, {
-      textScrollTop: textarea ? textarea.scrollTop : 0,
-      detailOpen: details.map((item) => item.open),
-      preScrollTop: preBlocks.map((item) => item.scrollTop),
+      <dl class="metadata-list compact">
+        <div><dt>Model</dt><dd>${escapeHtml(metadata.rq_screening_model || "")}</dd></div>
+        <div><dt>Prompt</dt><dd>${escapeHtml(metadata.rq_prompt_filename || "")}</dd></div>
+        <div><dt>Pages</dt><dd>${escapeHtml(metadata.number_of_pages || "")}</dd></div>
+        <div><dt>Warnings</dt><dd>${escapeHtml((metadata.warnings || []).join("; ") || "None")}</dd></div>
+      </dl>
+      <textarea class="inspector-result-text" spellcheck="false" readonly>${escapeHtml(output)}</textarea>
+      <details><summary>Processing stages and OCR text</summary><pre>${escapeHtml(payload.merged_full_text || "")}</pre></details>
+      <details><summary>Prompt sent to model</summary><pre>${escapeHtml(payload.prompt || "")}</pre></details>
+      <details><summary>Metadata</summary><pre>${escapeHtml(JSON.stringify(metadata, null, 2))}</pre></details>
+    `);
+    inspector.body.querySelector("[data-inspector-copy]")?.addEventListener("click", async (event) => {
+      await navigator.clipboard.writeText(output);
+      event.currentTarget.textContent = "Copied";
     });
-  });
-  return state;
-}
-
-function restoreInlineViewState(state) {
-  document.querySelectorAll(".inline-result[data-job-id]").forEach((panel) => {
-    const jobId = panel.dataset.jobId;
-    const saved = state.get(jobId);
-    if (!saved) return;
-    const textarea = panel.querySelector(".inline-result-text");
-    if (textarea) {
-      textarea.scrollTop = saved.textScrollTop || 0;
-    }
-    [...panel.querySelectorAll("details")].forEach((item, index) => {
-      item.open = Boolean(saved.detailOpen?.[index]);
-    });
-    [...panel.querySelectorAll("pre")].forEach((item, index) => {
-      item.scrollTop = saved.preScrollTop?.[index] || 0;
-    });
-  });
+  } catch (error) {
+    inspector.setContent(`<p class="queue-error">${escapeHtml(error.message || "Could not load result.")}</p>`);
+  }
 }
 
 async function rerunJob(job) {
@@ -1442,8 +1403,6 @@ async function rerunJob(job) {
       "queued"
     );
   } else {
-    expandedJobIds.delete(job.job_id);
-    inlineResultCache.delete(job.job_id);
     setStatus(`${job.filename || job.job_id}: queued for screening rerun`, 0, "queued");
   }
   resultPanel.classList.add("hidden");
@@ -1453,7 +1412,14 @@ async function rerunJob(job) {
 }
 
 async function deleteJob(job) {
-  if (!window.confirm(`Delete ${job.filename || job.job_id} and its whole job folder?`)) {
+  const confirmed = await CEREBROUI.confirm({
+    title: "Delete PDF job",
+    message: `Delete ${displayJobFilename(job)} and its complete job folder?`,
+    details: ["The extracted output, OCR text, prompt transcript, and metadata will be removed."],
+    confirmLabel: "Delete job",
+    danger: true,
+  });
+  if (!confirmed) {
     return;
   }
   const response = await fetch(withProject(`/api/jobs/${job.job_id}`), { method: "DELETE" });
@@ -1463,8 +1429,6 @@ async function deleteJob(job) {
     return;
   }
   trackedJobs.delete(job.job_id);
-  expandedJobIds.delete(job.job_id);
-  inlineResultCache.delete(job.job_id);
   if (currentJobId === job.job_id) {
     currentJobId = null;
   }
@@ -1537,4 +1501,8 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function escapeAttribute(value) {
+  return escapeHtml(value).replaceAll("\n", " ");
 }

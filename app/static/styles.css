@@ -21,6 +21,342 @@
   --radius: 8px;
 }
 
+/* Usability and bounded-workspace additions. */
+.secondary-button {
+  border-color: var(--line-strong);
+  background: rgb(13 22 37 / 0.86);
+  color: var(--ink);
+}
+
+.queue-scope-note {
+  max-width: 280px;
+  margin: 5px 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.form-error {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid rgb(255 107 122 / 0.5);
+  background: rgb(255 107 122 / 0.09);
+  color: #ffd9de;
+}
+
+.pdf-job-table-shell,
+.structured-job-table-shell {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  background: rgb(6 12 23 / 0.72);
+}
+
+.pdf-job-table-header,
+.pdf-job-data-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.5fr) 145px minmax(240px, 1.4fr) 170px 210px;
+  min-width: 985px;
+  width: 100%;
+}
+
+.pdf-job-table-header,
+.structured-job-table-header {
+  position: relative;
+  z-index: 3;
+  border-bottom: 1px solid var(--line-strong);
+  background: rgb(15 24 39 / 0.98);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.pdf-job-table-header > span,
+.structured-job-table-header > span {
+  display: flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 8px 10px;
+  border-right: 1px solid var(--line);
+}
+
+.pdf-job-viewport,
+.structured-job-viewport {
+  position: relative;
+  height: min(62vh, 600px);
+  min-height: 320px;
+  overflow: auto;
+  outline: none;
+}
+
+.pdf-job-virtual-spacer,
+.structured-job-virtual-spacer {
+  position: relative;
+  min-width: 985px;
+  width: 100%;
+}
+
+.pdf-job-virtual-rows,
+.structured-job-virtual-rows {
+  position: absolute;
+  inset: 0 auto auto 0;
+  min-width: 985px;
+  width: 100%;
+}
+
+.pdf-job-data-row {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  height: 76px;
+  border-bottom: 1px solid var(--line);
+  background: rgb(10 18 31 / 0.92);
+}
+
+.pdf-job-data-row:hover,
+.structured-job-data-row:hover {
+  background: rgb(55 215 255 / 0.055);
+}
+
+.pdf-job-cell,
+.structured-job-cell {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+  padding: 8px 10px;
+  border-right: 1px solid var(--line);
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.pdf-job-file,
+.pdf-job-model,
+.pdf-job-status {
+  align-items: flex-start;
+  justify-content: center;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pdf-job-cell strong,
+.pdf-job-cell small,
+.structured-job-cell {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pdf-job-cell small {
+  max-width: 100%;
+  color: var(--muted);
+}
+
+.pdf-job-cell.queue-row-actions {
+  display: grid;
+  grid-column: auto;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.pdf-job-empty,
+.structured-job-empty {
+  position: absolute;
+  top: 48px;
+  left: 24px;
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.pdf-job-empty strong {
+  color: var(--ink);
+}
+
+.structured-job-table-header,
+.structured-job-data-row {
+  display: grid;
+  grid-template-columns: minmax(230px, 1.4fr) 130px 130px minmax(220px, 1fr) 90px;
+  min-width: 900px;
+  width: 100%;
+}
+
+.structured-job-virtual-spacer,
+.structured-job-virtual-rows {
+  min-width: 900px;
+}
+
+.structured-job-data-row {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  height: 58px;
+  border-bottom: 1px solid var(--line);
+  background: rgb(10 18 31 / 0.92);
+}
+
+.structured-job-action {
+  justify-content: center;
+}
+
+.structured-job-action button {
+  min-height: 30px;
+  padding: 5px 9px;
+}
+
+.cerebro-inspector-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  justify-content: flex-end;
+  background: rgb(3 8 16 / 0.58);
+}
+
+.cerebro-inspector {
+  width: min(720px, 92vw);
+  height: 100%;
+  overflow: hidden;
+  border-left: 1px solid var(--line-strong);
+  background: var(--panel);
+  box-shadow: -18px 0 50px rgb(0 0 0 / 0.38);
+}
+
+.cerebro-inspector-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.cerebro-inspector-head h2,
+.cerebro-confirm-dialog h2 {
+  margin: 0;
+}
+
+.cerebro-inspector-subtitle {
+  margin: 5px 0 0;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.cerebro-inspector-body {
+  height: calc(100% - 98px);
+  padding: 18px;
+  overflow: auto;
+}
+
+.cerebro-inspector-body pre {
+  max-height: 46vh;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.inspector-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.inspector-result-text {
+  min-height: 40vh;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.cerebro-confirm-dialog h2 {
+  margin-bottom: 8px;
+  font-size: 20px;
+}
+
+.confirm-detail-list {
+  max-height: 240px;
+  margin: 0 0 16px;
+  padding-left: 20px;
+  overflow: auto;
+  color: var(--muted);
+}
+
+.spreadsheet-preview-card {
+  overflow: hidden;
+}
+
+.spreadsheet-preview-card .subsection-title small {
+  color: var(--muted);
+}
+
+.spreadsheet-preview-table {
+  max-height: 250px;
+  overflow: auto;
+  border: 1px solid #b7b7b7;
+  background: #fff;
+  color: #111;
+}
+
+.spreadsheet-preview-row {
+  display: grid;
+  min-width: max-content;
+}
+
+.spreadsheet-preview-row > * {
+  min-width: 150px;
+  padding: 7px 8px;
+  overflow: hidden;
+  border-right: 1px solid #d9d9d9;
+  border-bottom: 1px solid #d9d9d9;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spreadsheet-preview-row.header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #ededed;
+}
+
+.text-sheet-editor-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  background: rgb(6 12 23 / 0.46);
+}
+
+@media (max-width: 760px) {
+  .cerebro-inspector {
+    width: calc(100vw - 24px);
+  }
+
+  .text-sheet-editor-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .pdf-job-viewport,
+  .structured-job-viewport {
+    min-height: 380px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
 * {
   box-sizing: border-box;
 }

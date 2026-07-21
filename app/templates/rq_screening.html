@@ -83,8 +83,12 @@
               <p class="eyebrow">Source intake</p>
               <h2>Upload and configure extraction</h2>
             </div>
-            <span class="panel-kicker">PDF to structured insight</span>
+            <div class="actions">
+              <span class="panel-kicker">PDF to structured insight</span>
+              <button id="togglePdfSetupButton" class="secondary-button" type="button" aria-expanded="true" aria-controls="pdfSetupBody">Hide setup</button>
+            </div>
           </div>
+          <div id="pdfSetupBody">
           <div class="grid">
             <div class="file-picker upload-card">
               <span class="file-picker-label">PDF files</span>
@@ -178,6 +182,7 @@
             <div class="queue-hint">Jobs are processed through the existing CEREBRO queue.</div>
             <button id="runButton" type="submit">Add to queue</button>
           </div>
+          </div>
         </form>
       </section>
 
@@ -200,20 +205,21 @@
         </div>
         <div class="dashboard-control-grid">
           <div class="control-card queue-control-card">
-            <p class="eyebrow">Queue controls</p>
+            <p class="eyebrow">Shared PDF queue</p>
+            <p class="queue-scope-note">These controls affect standard and structured PDF jobs in every project.</p>
             <div class="icon-control-row">
-              <button id="pauseButton" class="icon-button" type="button" aria-label="Pause queue" title="Pause queue">
+              <button id="pauseButton" class="icon-button" type="button" aria-label="Pause all PDF processing" title="Pause all PDF processing across projects">
                 <svg viewBox="0 0 24 24" aria-hidden="true">
                   <rect x="7" y="5" width="3.5" height="14" rx="1"></rect>
                   <rect x="13.5" y="5" width="3.5" height="14" rx="1"></rect>
                 </svg>
-                <span class="visually-hidden">Pause queue</span>
+                <span class="visually-hidden">Pause all PDF processing</span>
               </button>
-              <button id="resumeButton" class="icon-button" type="button" aria-label="Resume queue" title="Resume queue using the current UI settings for pending jobs">
+              <button id="resumeButton" class="icon-button" type="button" aria-label="Resume all PDF processing" title="Resume all PDF processing using the current UI settings for pending jobs in this project">
                 <svg viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M8 5.5v13l10-6.5z"></path>
                 </svg>
-                <span class="visually-hidden">Resume queue</span>
+                <span class="visually-hidden">Resume all PDF processing</span>
               </button>
             </div>
           </div>
@@ -275,11 +281,24 @@
           <div class="queue-panel-head">
             <div>
               <p class="eyebrow">File-level view</p>
-              <h3>Files in this run</h3>
+              <h3>Project job history</h3>
             </div>
-            <span class="queue-chip">Real queue status</span>
+            <span class="queue-chip">Windowed history</span>
           </div>
-          <div id="queueList" class="queue-list"></div>
+          <div id="queueSummary" class="queue-summary cockpit-summary"></div>
+          <div id="pdfJobTableShell" class="pdf-job-table-shell" role="grid" aria-label="Project PDF jobs" aria-rowcount="0">
+            <div id="pdfJobTableHeader" class="pdf-job-table-header" role="row">
+              <span role="columnheader">File</span>
+              <span role="columnheader">Status</span>
+              <span role="columnheader">Model and prompt</span>
+              <span role="columnheader">Timing</span>
+              <span role="columnheader">Actions</span>
+            </div>
+            <div id="queueList" class="pdf-job-viewport" tabindex="0">
+              <div id="pdfJobVirtualSpacer" class="pdf-job-virtual-spacer"></div>
+              <div id="pdfJobVirtualRows" class="pdf-job-virtual-rows"></div>
+            </div>
+          </div>
         </div>
         <details class="technical-log">
           <summary>Show detailed processing events</summary>
@@ -336,6 +355,7 @@
     <input id="currentProjectId" type="hidden" value="{{ current_project.project_id }}" />
     <script id="projectData" type="application/json">{{ projects | tojson }}</script>
     <script id="modelPresetData" type="application/json">{{ model_presets | tojson }}</script>
-    <script src="/static/rq_screening.js?v=20260604-text"></script>
+    <script src="/static/ui_helpers.js?v=20260720-usability"></script>
+    <script src="/static/rq_screening.js?v=20260720-usability"></script>
   </body>
 </html>

@@ -547,6 +547,83 @@ def list_structured_jobs(project_id: str) -> list[dict[str, Any]]:
     return records
 
 
+def list_structured_jobs_window(
+    project_id: str,
+    *,
+    sheet_id: str = "",
+    offset: int = 0,
+    limit: int = 80,
+    status: str = "all",
+    search: str = "",
+) -> dict[str, Any]:
+    records = list_structured_jobs(project_id)
+    selected_sheet_id = str(sheet_id or "").strip()
+    if selected_sheet_id:
+        validate_sheet_id(selected_sheet_id)
+        records = [
+            record
+            for record in records
+            if str((record.get("metadata") or {}).get("structured_sheet_id") or "") == selected_sheet_id
+        ]
+
+    counts = {"all": len(records), "running": 0, "queued": 0, "completed": 0, "failed": 0, "parse_error": 0}
+    for record in records:
+        key = structured_job_status_key(record)
+        counts[key] += 1
+        metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+        if str(metadata.get("structured_parse_status") or "").lower() == "failed":
+            counts["parse_error"] += 1
+
+    requested_status = str(status or "all").strip().lower()
+    query = str(search or "").strip().lower()
+    filtered = [
+        record
+        for record in records
+        if (requested_status == "all" or structured_job_status_key(record) == requested_status)
+        and (not query or query in structured_job_search_haystack(record))
+    ]
+    safe_limit = max(1, min(int(limit or 80), 250))
+    safe_offset = max(0, int(offset or 0))
+    if filtered and safe_offset >= len(filtered):
+        safe_offset = max(0, ((len(filtered) - 1) // safe_limit) * safe_limit)
+    return {
+        "items": filtered[safe_offset : safe_offset + safe_limit],
+        "total": len(filtered),
+        "offset": safe_offset,
+        "limit": safe_limit,
+        "counts": counts,
+    }
+
+
+def structured_job_status_key(record: dict[str, Any]) -> str:
+    payload = record.get("status") if isinstance(record.get("status"), dict) else {}
+    value = str(payload.get("status") or "queued").strip().lower()
+    if value in {"complete", "completed"}:
+        return "completed"
+    if value in {"failed", "error"}:
+        return "failed"
+    if value == "running":
+        return "running"
+    return "queued"
+
+
+def structured_job_search_haystack(record: dict[str, Any]) -> str:
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    status = record.get("status") if isinstance(record.get("status"), dict) else {}
+    values = [
+        record.get("job_id"),
+        record.get("filename"),
+        status.get("status"),
+        status.get("message"),
+        metadata.get("original_filename"),
+        metadata.get("structured_sheet_name"),
+        metadata.get("structured_parse_status"),
+        metadata.get("structured_parse_error"),
+        metadata.get("rq_screening_model"),
+    ]
+    return " ".join(str(value or "") for value in values).lower()
+
+
 def lock_sheet_for_first_run(project_id: str, sheet_id: str, job_id: str) -> dict[str, Any]:
     sheet = get_sheet(project_id, sheet_id)
     if sheet_is_locked(sheet):

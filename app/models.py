@@ -14,6 +14,11 @@ QWEN35_9B_PRESET: dict[str, Any] = {
     "rq_enable_thinking": True,
 }
 
+GPT54_MINI_HIGH_PRESET_ID = "openai_gpt54_mini_high"
+GPT54_MINI_XHIGH_PRESET_ID = "openai_gpt54_mini_xhigh"
+GPT54_NANO_XHIGH_PRESET_ID = "openai_gpt54_nano_xhigh"
+GPT54_NANO_MAX_OUTPUT_TOKENS = 128_000
+
 MODEL_PRESETS: dict[str, dict[str, Any]] = {
     "qwen35_9b_8bit_reasoning": QWEN35_9B_PRESET,
     "qwen36_27b_instruct": {
@@ -28,7 +33,7 @@ MODEL_PRESETS: dict[str, dict[str, Any]] = {
         "rq_enable_thinking": True,
         "openai_reasoning_effort": "high",
     },
-    "openai_gpt54_mini_high": {
+    GPT54_MINI_HIGH_PRESET_ID: {
         "label": "OpenAI gpt-5.4 mini (high reasoning)",
         "rq_provider": "openai",
         "rq_screening_model": "gpt-5.4-mini",
@@ -36,7 +41,32 @@ MODEL_PRESETS: dict[str, dict[str, Any]] = {
         "rq_enable_thinking": True,
         "openai_reasoning_effort": "high",
     },
+    GPT54_MINI_XHIGH_PRESET_ID: {
+        "label": "OpenAI gpt-5.4 mini (xhigh reasoning)",
+        "rq_provider": "openai",
+        "rq_screening_model": "gpt-5.4-mini",
+        "rq_max_tokens": config.OPENAI_RQ_SCREENING_MAX_TOKENS,
+        "rq_enable_thinking": True,
+        "openai_reasoning_effort": "xhigh",
+    },
+    GPT54_NANO_XHIGH_PRESET_ID: {
+        "label": "OpenAI gpt-5.4 nano (xhigh reasoning)",
+        "rq_provider": "openai",
+        "rq_screening_model": "gpt-5.4-nano",
+        "rq_max_tokens": min(config.OPENAI_RQ_SCREENING_MAX_TOKENS, GPT54_NANO_MAX_OUTPUT_TOKENS),
+        "rq_enable_thinking": True,
+        "openai_reasoning_effort": "xhigh",
+    },
 }
+
+
+def normalize_selectable_model_preset(preset_id: str) -> str:
+    """Map superseded GPT-5.4 mini preset IDs to the current selectable preset."""
+
+    normalized = str(preset_id or "").strip()
+    if normalized not in MODEL_PRESETS and normalized.startswith("openai_gpt54_mini_"):
+        return GPT54_MINI_XHIGH_PRESET_ID
+    return normalized
 
 
 @dataclass
@@ -84,6 +114,9 @@ class JobSettings:
         form = dict(form)
         preset_id = str(form.get("rq_model_preset") or "").strip()
         preset = MODEL_PRESETS.get(preset_id)
+        if preset is None and not str(form.get("rq_screening_model") or "").strip():
+            preset_id = normalize_selectable_model_preset(preset_id)
+            preset = MODEL_PRESETS.get(preset_id)
         if preset is not None:
             form.update(preset)
             form["rq_model_preset"] = preset_id

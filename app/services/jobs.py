@@ -354,6 +354,79 @@ def list_jobs(limit: int = 200, project_id: str | None = None) -> list[dict[str,
     return records
 
 
+def list_jobs_window(
+    *,
+    project_id: str | None = None,
+    offset: int = 0,
+    limit: int = 80,
+    status: str = "all",
+    search: str = "",
+) -> dict[str, Any]:
+    """Return a bounded, filterable job window for the dashboard.
+
+    Job folders remain the source of truth. This keeps the API backward
+    compatible while preventing the browser from receiving every historical
+    job on each refresh.
+    """
+
+    records = list_jobs(limit=0, project_id=project_id)
+    counts = {"all": len(records), "running": 0, "queued": 0, "completed": 0, "failed": 0}
+    active_items: list[dict[str, Any]] = []
+    for record in records:
+        key = job_status_key(record)
+        if key in counts:
+            counts[key] += 1
+        if key in {"running", "queued"}:
+            active_items.append(record)
+
+    requested_status = str(status or "all").strip().lower()
+    query = str(search or "").strip().lower()
+    filtered = [
+        record
+        for record in records
+        if (requested_status == "all" or job_status_key(record) == requested_status)
+        and (not query or query in job_search_haystack(record))
+    ]
+    safe_limit = max(1, min(int(limit or 80), 250))
+    safe_offset = max(0, int(offset or 0))
+    if filtered and safe_offset >= len(filtered):
+        safe_offset = max(0, ((len(filtered) - 1) // safe_limit) * safe_limit)
+    items = filtered[safe_offset : safe_offset + safe_limit]
+    return {
+        "items": items,
+        "total": len(filtered),
+        "offset": safe_offset,
+        "limit": safe_limit,
+        "counts": counts,
+        "active_items": active_items[:50],
+    }
+
+
+def job_status_key(record: dict[str, Any]) -> str:
+    payload = record.get("status") if isinstance(record.get("status"), dict) else {}
+    value = str(payload.get("status") or record.get("status") or "queued").strip().lower()
+    if value in {"complete", "completed"}:
+        return "completed"
+    if value in {"failed", "error"}:
+        return "failed"
+    if value == "running":
+        return "running"
+    return "queued"
+
+
+def job_search_haystack(record: dict[str, Any]) -> str:
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    values = [
+        record.get("job_id"),
+        record.get("filename"),
+        metadata.get("original_filename"),
+        metadata.get("source_relative_path"),
+        metadata.get("rq_prompt_filename"),
+        metadata.get("rq_screening_model"),
+    ]
+    return " ".join(str(value or "") for value in values).lower()
+
+
 def load_job_settings(root: Path) -> JobSettings:
     metadata = read_metadata(root)
     raw_settings = metadata.get("settings") if isinstance(metadata.get("settings"), dict) else {}

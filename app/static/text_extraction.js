@@ -17,6 +17,10 @@ const studyIdColumnInput = document.querySelector("#studyIdColumnInput");
 const sourceFilenameLabel = document.querySelector("#sourceFilenameLabel");
 const sourceDetailsLabel = document.querySelector("#sourceDetailsLabel");
 const frozenMappingList = document.querySelector("#frozenMappingList");
+const spreadsheetPreviewPanel = document.querySelector("#spreadsheetPreviewPanel");
+const spreadsheetInspectionSummary = document.querySelector("#spreadsheetInspectionSummary");
+const spreadsheetPreviewTable = document.querySelector("#spreadsheetPreviewTable");
+const sourceInspectionStatus = document.querySelector("#sourceInspectionStatus");
 
 const textSheetTabs = document.querySelector("#textSheetTabs");
 const textSheetTabsScrollLeft = document.querySelector("#textSheetTabsScrollLeft");
@@ -35,6 +39,9 @@ const promptFilenameInput = document.querySelector("#promptFilenameInput");
 const savePromptButton = document.querySelector("#savePromptButton");
 const loadSavedPromptButton = document.querySelector("#loadSavedPromptButton");
 const promptStatus = document.querySelector("#promptStatus");
+const toggleTextSheetSetupButton = document.querySelector("#toggleTextSheetSetupButton");
+const textSheetSetupBody = document.querySelector("#textSheetSetupBody");
+const textSheetProvenanceSummary = document.querySelector("#textSheetProvenanceSummary");
 
 const textQueueBadge = document.querySelector("#textQueueBadge");
 const textStatusLine = document.querySelector("#textStatusLine");
@@ -48,6 +55,7 @@ const textSearchInput = document.querySelector("#textSearchInput");
 const clearTextSearchButton = document.querySelector("#clearTextSearchButton");
 const textFilterSummaryLine = document.querySelector("#textFilterSummaryLine");
 const textWorkbookHeader = document.querySelector("#textWorkbookHeader");
+const textWorkbookTableShell = document.querySelector("#textWorkbookTableShell");
 const textTableViewport = document.querySelector("#textTableViewport");
 const textVirtualSpacer = document.querySelector("#textVirtualSpacer");
 const textVirtualRows = document.querySelector("#textVirtualRows");
@@ -70,12 +78,14 @@ let textSearchQuery = "";
 let totalRows = 0;
 let loadedWindow = { offset: -1, limit: 0, items: [] };
 let windowRequestKey = "";
-let countsTimer = null;
-let visibleWindowTimer = null;
+let textPollingTimer = null;
+let lastTextCounts = { total: 0, not_run: 0, queued: 0, running: 0, completed: 0, failed: 0 };
 let searchDebounceTimer = null;
 let autosaveTimer = null;
 let sheetDirty = false;
 let sheetSaveInFlight = false;
+let inspectedColumns = [];
+let inspectedPreviewRows = [];
 
 document.addEventListener("DOMContentLoaded", async () => {
   initializeProjectSidebar();
@@ -90,8 +100,14 @@ document.addEventListener("DOMContentLoaded", async () => {
 });
 
 chooseSpreadsheetButton.addEventListener("click", () => spreadsheetInput.click());
-spreadsheetInput.addEventListener("change", updateSpreadsheetSummary);
+spreadsheetInput.addEventListener("change", inspectSelectedSpreadsheet);
 addMappingButton.addEventListener("click", () => addMappingRow());
+toggleTextSheetSetupButton?.addEventListener("click", () => {
+  setTextSheetSetupCollapsed(!textSheetSetupBody.classList.contains("hidden"));
+});
+document.addEventListener("visibilitychange", () => {
+  scheduleTextPolling(document.hidden ? 30000 : 0);
+});
 modelPresetSelect.addEventListener("change", () => {
   renderSelectedModelPreset();
   markSheetDirty();
@@ -189,7 +205,15 @@ async function createWorkbookSource(event) {
   const file = spreadsheetInput.files[0];
   const mappings = collectMappings();
   if (!file) return setTextStatus("Choose a CSV or XLSX file.", "failed");
+  if (!inspectedColumns.length) return setTextStatus("Wait for CEREBRO to inspect the spreadsheet headers.", "failed");
   if (!mappings.length) return setTextStatus("Add at least one column mapping.", "failed");
+  const confirmed = await CEREBROUI.confirm({
+    title: "Create and freeze project workbook",
+    message: `Use ${file.name} with ${mappings.length} selected input column${mappings.length === 1 ? "" : "s"}?`,
+    details: ["The source file and column mapping cannot be changed inside this project after creation.", "Every sheet in this project will reuse these selected input columns."],
+    confirmLabel: "Create and freeze workbook",
+  });
+  if (!confirmed) return;
   createTextWorkbookButton.disabled = true;
   try {
     setTextStatus("Creating workbook...", "running");
@@ -264,10 +288,15 @@ function renderActiveSheet(sheet) {
   const apiKeyInput = openaiApiKeyField.querySelector("input");
   if (apiKeyInput) apiKeyInput.disabled = locked;
   runTextSheetButton.disabled = locked;
-  runTextSheetButton.textContent = locked ? "Sheet completed or running" : "Run this sheet";
+  const exactState = sheet.status || (locked ? "locked" : "draft");
+  runTextSheetButton.textContent = locked ? "Sheet locked" : "Run this sheet";
   duplicateTextSheetButton.disabled = false;
   textSheetSaveStatus.textContent = locked ? "Prompt and model preserved from the first run." : "Sheet changes save automatically.";
   textSheetSaveStatus.className = "queue-hint";
+  textSheetProvenanceSummary.textContent = locked
+    ? `${sentenceCase(exactState)} | ${sheet.rq_model_preset || "Model preserved"} | ${sheet.rq_prompt_filename || "Prompt preserved"}`
+    : "Draft sheet. Prompt and model changes save automatically.";
+  setTextSheetSetupCollapsed(locked);
   setPromptStatus("", "");
   renderSelectedModelPreset();
 }
@@ -362,6 +391,13 @@ async function runActiveSheet(event) {
   if (!promptTemplateInput.value.trim()) return setTextStatus("Enter or load a system prompt before running the sheet.", "failed");
   const saved = await saveActiveSheet({ force: true });
   if (!saved) return;
+  const confirmed = await CEREBROUI.confirm({
+    title: "Run and lock this sheet",
+    message: `Create one extraction job per spreadsheet row for ${saved.name || "this sheet"}?`,
+    details: ["The prompt and model become read-only when the run starts.", "Duplicate the sheet later to test another prompt or model."],
+    confirmLabel: "Run and lock sheet",
+  });
+  if (!confirmed) return;
   runTextSheetButton.disabled = true;
   try {
     setTextStatus("Creating row jobs for this sheet...", "running");
@@ -375,10 +411,17 @@ async function runActiveSheet(event) {
     renderActiveSheet(payload.sheet);
     setTextStatus(`Queued ${Number(payload.count || 0).toLocaleString()} row jobs for ${payload.sheet.name}.`, "queued");
     await Promise.all([refreshCounts(), loadVisibleWindow(0, { force: true })]);
+    scheduleTextPolling(0);
   } catch (error) {
     setTextStatus(error.message || "Could not run this sheet.", "failed");
     runTextSheetButton.disabled = false;
   }
+}
+
+function setTextSheetSetupCollapsed(collapsed) {
+  textSheetSetupBody?.classList.toggle("hidden", collapsed);
+  toggleTextSheetSetupButton?.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  if (toggleTextSheetSetupButton) toggleTextSheetSetupButton.textContent = collapsed ? "View prompt and settings" : "Hide prompt and settings";
 }
 
 function sheetFormData() {
@@ -422,17 +465,17 @@ function renderWorkbookHeader() {
   const columns = workbookColumns();
   const template = workbookGridTemplate(columns);
   const width = workbookGridWidth(columns);
-  const letters = columns.slice(1).map((_column, index) => `<span class="excel-column-letter">${excelColumnName(index + 1)}</span>`).join("");
+  const letters = columns.slice(1).map((_column, index) => `<span class="excel-column-letter" aria-hidden="true">${excelColumnName(index + 1)}</span>`).join("");
   const labels = columns
     .slice(1)
-    .map((column) => `<span class="text-workbook-column-label" title="${escapeAttribute(column.title || column.label)}">${escapeHtml(column.label)}</span>`)
+    .map((column) => `<span class="text-workbook-column-label" role="columnheader" title="${escapeAttribute(column.title || column.label)}">${escapeHtml(column.label)}</span>`)
     .join("");
   textWorkbookHeader.style.width = `${width}px`;
   textWorkbookHeader.innerHTML = `
-    <div class="text-workbook-header-row" style="grid-template-columns:${template}">
+    <div class="text-workbook-header-row" role="presentation" style="grid-template-columns:${template}">
       <span class="excel-corner-cell"></span>${letters}
     </div>
-    <div class="text-workbook-header-row text-workbook-label-row" style="grid-template-columns:${template}">
+    <div class="text-workbook-header-row text-workbook-label-row" role="row" style="grid-template-columns:${template}">
       <span class="excel-row-number">1</span>${labels}
     </div>
   `;
@@ -477,8 +520,18 @@ function excelColumnName(index) {
 }
 
 function startPolling() {
-  if (!countsTimer) countsTimer = window.setInterval(refreshCounts, 2500);
-  if (!visibleWindowTimer) visibleWindowTimer = window.setInterval(refreshVisibleWindow, 3000);
+  scheduleTextPolling(0);
+}
+
+function scheduleTextPolling(delay = null) {
+  window.clearTimeout(textPollingTimer);
+  const active = Boolean(lastTextCounts.running || lastTextCounts.queued);
+  const nextDelay = delay ?? (document.hidden ? 30000 : active ? 2500 : 15000);
+  textPollingTimer = window.setTimeout(async () => {
+    await refreshCounts();
+    await refreshVisibleWindow();
+    scheduleTextPolling();
+  }, nextDelay);
 }
 
 async function refreshCounts() {
@@ -501,6 +554,7 @@ function renderCounts(counts, queue) {
     completed: Number(counts.completed || 0),
     failed: Number(counts.failed || 0),
   };
+  lastTextCounts = normalized;
   const metrics = [
     ["Total", normalized.total, ""],
     ["Completed", normalized.completed, "complete"],
@@ -512,7 +566,7 @@ function renderCounts(counts, queue) {
   textCounts.innerHTML = metrics.map(([label, value, tone]) => `<div class="stat-card ${tone}"><span>${label}</span><strong>${value.toLocaleString()}</strong></div>`).join("");
   textQueueBadge.textContent = normalized.total ? `${normalized.completed.toLocaleString()} / ${normalized.total.toLocaleString()} complete` : "No rows";
   textQueueBadge.className = `badge ${normalized.failed ? "failed" : normalized.running ? "running" : normalized.queued ? "queued" : normalized.completed ? "complete" : ""}`;
-  const queueState = queue.paused ? "Queue paused. " : "";
+  const queueState = queue.paused ? "Shared text queue paused. " : "";
   textStatusLine.textContent = `${queueState}${normalized.completed.toLocaleString()} completed, ${normalized.running.toLocaleString()} running, ${normalized.queued.toLocaleString()} queued, ${normalized.failed.toLocaleString()} failed.`;
   pauseTextQueueButton.disabled = Boolean(queue.paused);
   resumeTextQueueButton.disabled = !queue.paused;
@@ -572,6 +626,8 @@ function renderVirtualRows() {
   textVirtualSpacer.style.height = `${Math.max(1, totalRows) * ROW_HEIGHT}px`;
   textVirtualSpacer.style.width = `${width}px`;
   textVirtualRows.style.width = `${width}px`;
+  textWorkbookTableShell?.setAttribute("aria-rowcount", String(totalRows));
+  textWorkbookTableShell?.setAttribute("aria-colcount", String(columns.length - 1));
   if (!totalRows) {
     textVirtualRows.innerHTML = `<div class="text-workbook-empty"><strong>No rows match the current filters.</strong></div>`;
     textVirtualSpacer.style.height = "160px";
@@ -583,10 +639,11 @@ function renderVirtualRows() {
     const cells = columns.slice(1).map((column) => workbookCell(column, item)).join("");
     const row = document.createElement("div");
     row.className = "text-workbook-data-row";
+    row.setAttribute("role", "row");
     row.style.gridTemplateColumns = template;
     row.style.transform = `translateY(${rowIndex * ROW_HEIGHT}px)`;
-    row.innerHTML = `<span class="excel-row-number">${escapeHtml(Number(item.row || rowIndex + 1) + 1)}</span>${cells}`;
-    row.querySelector("[data-action='view']")?.addEventListener("click", () => showRowOutput(item.job_id));
+    row.innerHTML = `<span class="excel-row-number" aria-hidden="true">${escapeHtml(Number(item.row || rowIndex + 1) + 1)}</span>${cells}`;
+    row.querySelector("[data-action='view']")?.addEventListener("click", (event) => showRowOutput(item.job_id, event.currentTarget));
     row.querySelector("[data-action='retry']")?.addEventListener("click", () => retryRow(item.job_id));
     textVirtualRows.appendChild(row);
   });
@@ -595,25 +652,25 @@ function renderVirtualRows() {
 
 function workbookCell(column, item) {
   if (column.key === "status") {
-    return `<span class="text-workbook-cell"><span class="status-badge ${statusClass(item.status)}">${escapeHtml(item.status_label || item.status)}</span></span>`;
+    return `<span class="text-workbook-cell" role="gridcell"><span class="status-badge ${statusClass(item.status)}">${escapeHtml(item.status_label || item.status)}</span></span>`;
   }
   if (column.key === "record_id") {
-    return `<span class="text-workbook-cell" title="${escapeAttribute(item.record_id || "")}">${escapeHtml(item.record_id || "")}</span>`;
+    return `<span class="text-workbook-cell" role="gridcell" title="${escapeAttribute(item.record_id || "")}">${escapeHtml(item.record_id || "")}</span>`;
   }
   if (column.key.startsWith("mapped:")) {
     const name = column.key.slice(7);
     const value = item.mapped_cells?.[name] || "";
-    return `<span class="text-workbook-cell" title="${escapeAttribute(value)}">${escapeHtml(value)}</span>`;
+    return `<span class="text-workbook-cell" role="gridcell" title="${escapeAttribute(value)}">${escapeHtml(value)}</span>`;
   }
   if (column.key === "result") {
     const value = item.result_preview || item.error || "";
-    return `<span class="text-workbook-cell" title="${escapeAttribute(value)}">${escapeHtml(value)}</span>`;
+    return `<span class="text-workbook-cell" role="gridcell" title="${escapeAttribute(value)}">${escapeHtml(value)}</span>`;
   }
   if (column.key === "actions") {
     const hasJob = Boolean(item.job_id);
-    return `<span class="text-workbook-cell text-workbook-actions"><button type="button" data-action="view" ${hasJob ? "" : "disabled"}>View</button><button type="button" data-action="retry" ${item.status === "failed" ? "" : "disabled"}>Retry</button></span>`;
+    return `<span class="text-workbook-cell text-workbook-actions" role="gridcell"><button type="button" data-action="view" ${hasJob ? "" : "disabled"}>View</button><button type="button" data-action="retry" ${item.status === "failed" ? "" : "disabled"}>Retry</button></span>`;
   }
-  return `<span class="text-workbook-cell"></span>`;
+  return `<span class="text-workbook-cell" role="gridcell"></span>`;
 }
 
 function renderFilterButtons() {
@@ -631,31 +688,25 @@ function renderFilterSummary(visibleTotal) {
   textFilterSummaryLine.textContent = `Showing ${Number(visibleTotal).toLocaleString()} ${filterText}${searchText}.`;
 }
 
-async function showRowOutput(jobId) {
+async function showRowOutput(jobId, trigger) {
   if (!jobId) return;
-  const overlay = document.createElement("div");
-  overlay.className = "modal-overlay";
-  overlay.innerHTML = `<div class="modal text-output-modal"><p>Row output</p><pre>Loading...</pre><div class="modal-actions"><button type="button" data-action="close">Close</button></div></div>`;
-  overlay.querySelector("[data-action='close']").addEventListener("click", () => overlay.remove());
-  document.body.appendChild(overlay);
+  const inspector = CEREBROUI.openInspector({ kicker: "Text extraction row", title: "Row output", subtitle: jobId, trigger });
   try {
     const response = await fetch(withProject(`/api/text/jobs/${encodeURIComponent(jobId)}/output?sheet_id=${encodeURIComponent(activeSheetId)}`));
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.detail || "Could not load row output.");
     const metadata = payload.metadata || {};
-    overlay.querySelector(".modal").innerHTML = `
-      <p>${escapeHtml(metadata.record_id || jobId)}</p>
+    inspector.setSubtitle(metadata.record_id || jobId);
+    inspector.setContent(`
       <div class="text-output-tabs">
         <details open><summary>Output</summary><pre>${escapeHtml(payload.output || "No output yet.")}</pre></details>
         <details><summary>User prompt</summary><pre>${escapeHtml(payload.user_prompt || "")}</pre></details>
         <details><summary>System prompt</summary><pre>${escapeHtml(payload.system_prompt || "")}</pre></details>
         <details><summary>Metadata</summary><pre>${escapeHtml(JSON.stringify(metadata, null, 2))}</pre></details>
       </div>
-      <div class="modal-actions"><button type="button" data-action="close">Close</button></div>
-    `;
-    overlay.querySelector("[data-action='close']").addEventListener("click", () => overlay.remove());
+    `);
   } catch (error) {
-    overlay.querySelector("pre").textContent = error.message || "Could not load row output.";
+    inspector.setContent(`<p class="queue-error">${escapeHtml(error.message || "Could not load row output.")}</p>`);
   }
 }
 
@@ -688,14 +739,24 @@ async function retryFailedRows() {
 }
 
 async function setQueuePaused(paused) {
+  if (paused) {
+    const confirmed = await CEREBROUI.confirm({
+      title: "Pause all text processing",
+      message: "This shared control prevents new text rows from starting across every text extraction project.",
+      details: ["Rows already inside a model call will finish normally."],
+      confirmLabel: "Pause all text processing",
+    });
+    if (!confirmed) return;
+  }
   const button = paused ? pauseTextQueueButton : resumeTextQueueButton;
   button.disabled = true;
   try {
     const response = await fetch(`/api/text/queue/${paused ? "pause" : "resume"}`, { method: "POST", body: projectFormData() });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.detail || "Could not update the queue.");
-    setTextStatus(paused ? "Queue paused. Active rows will finish." : "Queue resumed.", paused ? "queued" : "running");
+    setTextStatus(paused ? "All text processing paused. Active rows will finish." : "All text processing resumed.", paused ? "queued" : "running");
     await refreshCounts();
+    scheduleTextPolling(0);
   } catch (error) {
     setTextStatus(error.message || "Could not update the queue.", "failed");
   } finally {
@@ -706,17 +767,24 @@ async function setQueuePaused(paused) {
 function addMappingRow(columnName = "", promptLabel = "") {
   const row = document.createElement("div");
   row.className = "column-mapping-row";
+  const options = [`<option value="">Select a detected column</option>`]
+    .concat(inspectedColumns.map((column) => `<option value="${escapeAttribute(column)}" ${column === columnName ? "selected" : ""}>${escapeHtml(column)}</option>`))
+    .join("");
   row.innerHTML = `
-    <label class="field"><span>Column name</span><input data-mapping-field="column_name" type="text" value="${escapeAttribute(columnName)}" placeholder="abstract" /></label>
+    <label class="field"><span>Column name</span><select data-mapping-field="column_name" ${inspectedColumns.length ? "" : "disabled"}>${options}</select></label>
     <label class="field"><span>Prompt label</span><input data-mapping-field="prompt_label" type="text" value="${escapeAttribute(promptLabel)}" placeholder="Abstract" /></label>
     <button class="icon-button remove-mapping-button" type="button" aria-label="Remove column mapping" title="Remove column mapping"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
   `;
   row.querySelector(".remove-mapping-button").addEventListener("click", () => {
     if (columnMappings.querySelectorAll(".column-mapping-row").length <= 1) {
-      row.querySelectorAll("input").forEach((input) => { input.value = ""; });
+      row.querySelectorAll("input, select").forEach((input) => { input.value = ""; });
     } else {
       row.remove();
     }
+  });
+  row.querySelector("[data-mapping-field='column_name']").addEventListener("change", (event) => {
+    const labelInput = row.querySelector("[data-mapping-field='prompt_label']");
+    if (labelInput && !labelInput.value.trim()) labelInput.value = humanizeColumnName(event.currentTarget.value);
   });
   columnMappings.appendChild(row);
 }
@@ -733,6 +801,72 @@ function collectMappings() {
 function updateSpreadsheetSummary() {
   const file = spreadsheetInput.files[0];
   spreadsheetInputSummary.textContent = file ? `${file.name} (${formatBytes(file.size)})` : "No file selected";
+}
+
+async function inspectSelectedSpreadsheet() {
+  updateSpreadsheetSummary();
+  const file = spreadsheetInput.files[0];
+  inspectedColumns = [];
+  inspectedPreviewRows = [];
+  spreadsheetPreviewPanel.classList.add("hidden");
+  studyIdColumnInput.innerHTML = '<option value="">Use spreadsheet row number</option>';
+  studyIdColumnInput.disabled = true;
+  columnMappings.innerHTML = "";
+  addMappingRow();
+  if (!file) {
+    sourceInspectionStatus.textContent = "Choose a spreadsheet to inspect its headers.";
+    return;
+  }
+  sourceInspectionStatus.textContent = "Inspecting spreadsheet headers and sample rows...";
+  sourceInspectionStatus.className = "queue-hint running";
+  createTextWorkbookButton.disabled = true;
+  try {
+    const body = new FormData();
+    body.append("project_id", currentProjectId);
+    body.append("spreadsheet", file, file.name);
+    const response = await fetch("/api/text/source/inspect", { method: "POST", body });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.detail || "Could not inspect the spreadsheet.");
+    inspectedColumns = payload.columns || [];
+    inspectedPreviewRows = payload.preview_rows || [];
+    studyIdColumnInput.innerHTML = ['<option value="">Use spreadsheet row number</option>']
+      .concat(inspectedColumns.map((column) => `<option value="${escapeAttribute(column)}">${escapeHtml(column)}</option>`))
+      .join("");
+    studyIdColumnInput.disabled = false;
+    columnMappings.innerHTML = "";
+    addMappingRow();
+    renderSpreadsheetPreview();
+    sourceInspectionStatus.textContent = `Detected ${inspectedColumns.length.toLocaleString()} columns. Select the fields used to construct each row prompt.`;
+    sourceInspectionStatus.className = "queue-hint complete";
+  } catch (error) {
+    sourceInspectionStatus.textContent = error.message || "Could not inspect the spreadsheet.";
+    sourceInspectionStatus.className = "queue-hint failed";
+    setTextStatus(sourceInspectionStatus.textContent, "failed");
+  } finally {
+    createTextWorkbookButton.disabled = false;
+  }
+}
+
+function renderSpreadsheetPreview() {
+  spreadsheetPreviewPanel.classList.toggle("hidden", !inspectedColumns.length);
+  spreadsheetInspectionSummary.textContent = `${inspectedColumns.length} columns | first ${inspectedPreviewRows.length} non-empty rows`;
+  const visibleColumns = inspectedColumns.slice(0, 8);
+  const template = `repeat(${Math.max(1, visibleColumns.length)}, minmax(150px, 1fr))`;
+  spreadsheetPreviewTable.innerHTML = `
+    <div class="spreadsheet-preview-row header" style="grid-template-columns:${template}">
+      ${visibleColumns.map((column) => `<strong>${escapeHtml(column)}</strong>`).join("")}
+    </div>
+    ${inspectedPreviewRows.map((row) => `
+      <div class="spreadsheet-preview-row" style="grid-template-columns:${template}">
+        ${visibleColumns.map((column) => `<span title="${escapeAttribute(row[column] || "")}">${escapeHtml(row[column] || "")}</span>`).join("")}
+      </div>
+    `).join("")}
+  `;
+}
+
+function humanizeColumnName(value) {
+  const text = String(value || "").replaceAll("_", " ").replace(/([a-z])([A-Z])/g, "$1 $2").trim();
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : "";
 }
 
 function renderSelectedModelPreset() {
@@ -787,12 +921,13 @@ async function showSavedPromptPicker() {
     overlay.className = "modal-overlay";
     const items = (payload.prompts || []).map((prompt) => `<button type="button" class="prompt-choice" data-filename="${escapeAttribute(prompt.filename)}">${escapeHtml(prompt.filename)}</button>`).join("");
     overlay.innerHTML = `<div class="modal"><p>Load saved prompt</p><div class="prompt-choice-list">${items || "<p>No prompt files found.</p>"}</div><div class="modal-actions"><button type="button" data-action="cancel">Cancel</button></div></div>`;
-    overlay.querySelector("[data-action='cancel']").addEventListener("click", () => overlay.remove());
+    overlay.querySelector("[data-action='cancel']").addEventListener("click", () => CEREBROUI.hideDialog(overlay));
     overlay.querySelectorAll(".prompt-choice").forEach((button) => button.addEventListener("click", async () => {
-      overlay.remove();
+      CEREBROUI.hideDialog(overlay);
       await loadPromptTemplate(button.dataset.filename);
     }));
     document.body.appendChild(overlay);
+    CEREBROUI.showDialog(overlay, { removeOnClose: true, closeOnBackdrop: true });
   } catch (error) {
     setPromptStatus(error.message || "Failed to load saved prompts.", "failed");
   }
@@ -863,6 +998,11 @@ function statusClass(status) {
   if (status === "running") return "running";
   if (status === "not_run") return "not-run";
   return "queued";
+}
+
+function sentenceCase(value) {
+  const text = String(value || "").replaceAll("_", " ").trim();
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : "";
 }
 
 function formatBytes(size) {

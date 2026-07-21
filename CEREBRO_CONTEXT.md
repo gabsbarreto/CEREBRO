@@ -225,6 +225,8 @@ Model presets currently include:
 - `qwen36_27b_instruct`: hidden local preset.
 - `openai_gpt5_mini_high`: public OpenAI GPT-5 mini preset with high reasoning.
 - `openai_gpt54_mini_high`: public OpenAI GPT-5.4 mini preset with high reasoning.
+- `openai_gpt54_mini_xhigh`: public OpenAI GPT-5.4 mini preset with xhigh reasoning.
+- `openai_gpt54_nano_xhigh`: public OpenAI GPT-5.4 nano preset with xhigh reasoning and a 128,000-token model limit.
 
 Provider normalization:
 
@@ -1059,7 +1061,7 @@ Covered areas include:
 - OpenAI response parsing.
 - Event subprocess runner.
 - OpenAI API key resolution order.
-- GPT-5.4 mini high preset.
+- Separate GPT-5.4 mini high/xhigh and GPT-5.4 nano xhigh presets.
 - OpenAI PDF file mode.
 - Job identity matching.
 - OCR and OpenAI file reuse helpers.
@@ -1279,7 +1281,8 @@ These are useful checks for future LLMs before editing:
 - Text sheets lock on first run. Duplicates are inserted directly after the source sheet and copy configuration without jobs/results.
 - Existing projects without `extraction_type` are treated as PDF projects by `normalize_extraction_type`.
 - Structured PDF projects use `extraction_type: "pdf_structured"` and route to `/structured-pdf`.
-- `openai_gpt54_mini_high` is a public preset for `gpt-5.4-mini` with `high` reasoning.
+- `openai_gpt54_mini_high` and `openai_gpt54_mini_xhigh` are public presets for `gpt-5.4-mini` with `high` and `xhigh` reasoning, respectively.
+- `openai_gpt54_nano_xhigh` is a public preset for `gpt-5.4-nano` with `xhigh` reasoning and caps output at the model's 128,000-token limit.
 - Prompt files are shared globally across projects, not stored per project.
 - Runtime Excel summaries can be rebuilt from active jobs.
 - Structured PDF parse failures still mark the underlying model job complete; the parse status is carried separately in metadata and sheet error records.

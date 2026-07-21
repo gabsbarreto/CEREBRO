@@ -18,39 +18,41 @@
           </div>
           <a class="button" href="/">Back to CEREBRO</a>
         </div>
-        <form class="project-create-form" method="post" action="/projects/new">
+        <form id="projectCreateForm" class="project-create-form" method="post" action="/projects/new">
           <label class="field">
             <span>Project name</span>
-            <input name="project_name" type="text" autocomplete="off" required maxlength="120" />
+            <input id="projectNameInput" name="project_name" type="text" autocomplete="off" required maxlength="120" value="{{ form_values.project_name }}" aria-describedby="projectFormError" />
           </label>
           <label class="field">
             <span>Brief description</span>
-            <textarea name="description" rows="5" maxlength="1000"></textarea>
+            <textarea name="description" rows="5" maxlength="1000">{{ form_values.description }}</textarea>
           </label>
           <fieldset class="project-type-picker">
             <legend>Project type</legend>
             <label>
-              <input type="radio" name="extraction_type" value="pdf" checked />
+              <input type="radio" name="extraction_type" value="pdf" {% if form_values.extraction_type == "pdf" %}checked{% endif %} />
               <span>
                 <strong>PDF extraction</strong>
                 <small>Upload papers or folders and extract from article PDFs.</small>
               </span>
             </label>
             <label>
-              <input type="radio" name="extraction_type" value="text" />
+              <input type="radio" name="extraction_type" value="text" {% if form_values.extraction_type == "text" %}checked{% endif %} />
               <span>
                 <strong>Text extraction</strong>
                 <small>Upload CSV or XLSX rows and extract from selected text columns.</small>
               </span>
             </label>
             <label>
-              <input type="radio" name="extraction_type" value="pdf_structured" />
+              <input type="radio" name="extraction_type" value="pdf_structured" {% if form_values.extraction_type == "pdf_structured" %}checked{% endif %} />
               <span>
                 <strong>Structured PDF extraction</strong>
                 <small>Upload PDFs and extract tabular rows into workbook-style sheets.</small>
               </span>
             </label>
           </fieldset>
+          <p class="queue-hint">Project type cannot be changed after creation.</p>
+          <p id="projectFormError" class="form-error {% if not form_error %}hidden{% endif %}" role="alert">{{ form_error }}</p>
           <div class="form-footer">
             <div class="queue-hint">Jobs created after this will be stored inside the new project.</div>
             <button type="submit">Create project</button>
@@ -58,5 +60,24 @@
         </form>
       </section>
     </main>
+    <script>
+      const projectCreateForm = document.querySelector("#projectCreateForm");
+      const projectNameInput = document.querySelector("#projectNameInput");
+      const projectFormError = document.querySelector("#projectFormError");
+      projectCreateForm.addEventListener("submit", (event) => {
+        projectNameInput.value = projectNameInput.value.trim();
+        if (projectNameInput.value) return;
+        event.preventDefault();
+        projectFormError.textContent = "Project name is required.";
+        projectFormError.classList.remove("hidden");
+        projectNameInput.setAttribute("aria-invalid", "true");
+        projectNameInput.focus();
+      });
+      projectNameInput.addEventListener("input", () => {
+        if (!projectNameInput.value.trim()) return;
+        projectNameInput.removeAttribute("aria-invalid");
+        projectFormError.classList.add("hidden");
+      });
+    </script>
   </body>
 </html>

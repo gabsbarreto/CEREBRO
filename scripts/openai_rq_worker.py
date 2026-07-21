@@ -18,7 +18,7 @@ def main() -> int:
     parser.add_argument("--system-prompt-file", required=True)
     parser.add_argument("--user-prompt-file", required=True)
     parser.add_argument("--output-file", required=True)
-    parser.add_argument("--max-output-tokens", type=int, default=30000)
+    parser.add_argument("--max-output-tokens", type=int, default=150000)
     parser.add_argument("--enable-reasoning", default="true")
     parser.add_argument("--reasoning-effort", default="medium")
     parser.add_argument("--response-json-file", default="")

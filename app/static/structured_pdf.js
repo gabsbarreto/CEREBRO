@@ -24,6 +24,9 @@ const addColumnButton = document.querySelector("#addColumnButton");
 const pasteColumnsButton = document.querySelector("#pasteColumnsButton");
 const exportSheetTextButton = document.querySelector("#exportSheetTextButton");
 const sheetFormStatus = document.querySelector("#sheetFormStatus");
+const toggleStructuredSchemaButton = document.querySelector("#toggleStructuredSchemaButton");
+const structuredSchemaFields = document.querySelector("#structuredSchemaFields");
+const structuredColumnInstructions = document.querySelector("#structuredColumnInstructions");
 const compiledPromptPreview = document.querySelector("#compiledPromptPreview");
 const structuredExportLink = document.querySelector("#structuredExportLink");
 const structuredStatusLine = document.querySelector("#structuredStatusLine");
@@ -37,7 +40,14 @@ const structuredVirtualSpacer = document.querySelector("#structuredVirtualSpacer
 const structuredVirtualRows = document.querySelector("#structuredVirtualRows");
 const addColumnDivider = document.querySelector("#addColumnDivider");
 const structuredJobsList = document.querySelector("#structuredJobsList");
+const structuredJobsRows = document.querySelector("#structuredJobsRows");
+const structuredJobsHeader = document.querySelector("#structuredJobsHeader");
+const structuredJobsSpacer = document.querySelector("#structuredJobsSpacer");
+const structuredJobsTableShell = document.querySelector("#structuredJobsTableShell");
+const structuredJobsSummary = document.querySelector("#structuredJobsSummary");
 const refreshStructuredButton = document.querySelector("#refreshStructuredButton");
+const toggleStructuredSetupButton = document.querySelector("#toggleStructuredSetupButton");
+const structuredSetupBody = document.querySelector("#structuredSetupBody");
 const modelPresetSelect = document.querySelector("#modelPresetSelect");
 const openaiApiKeyField = document.querySelector("#openaiApiKeyField");
 const openaiInputModeField = document.querySelector("#openaiInputModeField");
@@ -83,10 +93,17 @@ const EXCEL_STATUS_WIDTH = 126;
 const EXCEL_PARSE_DATE_WIDTH = 170;
 const EXCEL_COLUMN_WIDTH = 180;
 const EXCEL_ADD_DIVIDER_WIDTH = 18;
+const STRUCTURED_JOB_ROW_HEIGHT = 58;
+const STRUCTURED_JOB_WINDOW_LIMIT = 80;
+const STRUCTURED_JOB_OVERSCAN = 8;
 
 let sheets = [];
 let activeSheet = null;
 let jobs = [];
+let structuredJobWindow = { offset: -1, limit: STRUCTURED_JOB_WINDOW_LIMIT, total: 0, items: [], sheetId: "" };
+let structuredJobCounts = { all: 0, running: 0, queued: 0, completed: 0, failed: 0, parse_error: 0 };
+let structuredQueueState = {};
+let structuredJobRequestKey = "";
 let rowWindow = { offset: -1, limit: 0, items: [], total: 0, search: "", sheetId: "" };
 let pollingTimer = null;
 let searchDebounceTimer = null;
@@ -112,6 +129,12 @@ chooseFolderButton.addEventListener("click", () => folderInput.click());
 pdfInput.addEventListener("change", updateUploadSummaries);
 folderInput.addEventListener("change", updateUploadSummaries);
 modelPresetSelect.addEventListener("change", renderSelectedModelPreset);
+toggleStructuredSetupButton?.addEventListener("click", () => {
+  setStructuredSetupCollapsed(!structuredSetupBody.classList.contains("hidden"));
+});
+toggleStructuredSchemaButton?.addEventListener("click", () => {
+  setStructuredSchemaCollapsed(!structuredSchemaFields.classList.contains("hidden"));
+});
 
 addSheetButton.addEventListener("click", async () => {
   await createWorkbookSheet();
@@ -222,7 +245,7 @@ structuredTableHeader.addEventListener("blur", (event) => {
 }, true);
 
 refreshStructuredButton.addEventListener("click", async () => {
-  await refreshJobs();
+  await refreshJobs(structuredJobWindow.offset >= 0 ? structuredJobWindow.offset : 0, { force: true });
   await loadRows(visibleOffset(), { force: true });
 });
 
@@ -237,6 +260,15 @@ structuredTableViewport.addEventListener("scroll", () => {
   if (Math.abs(offset - rowWindow.offset) >= SCROLL_OVERSCAN) {
     loadRows(offset);
   }
+});
+
+structuredJobsList.addEventListener("scroll", () => {
+  structuredJobsHeader.style.transform = `translateX(${-structuredJobsList.scrollLeft}px)`;
+  window.requestAnimationFrame(() => refreshJobs(structuredJobsVisibleOffset()));
+});
+
+document.addEventListener("visibilitychange", () => {
+  scheduleStructuredPolling(document.hidden ? 30000 : 0);
 });
 
 window.addEventListener("resize", positionAddColumnDivider);
@@ -422,6 +454,7 @@ function renderActiveSheet() {
     applySheetLockState();
     renderStructuredHeader([]);
     renderRows();
+    setStructuredSchemaCollapsed(false);
     isRenderingSheet = false;
     return;
   }
@@ -437,6 +470,7 @@ function renderActiveSheet() {
   renderStructuredHeader(activeSheet.columns || []);
   renderPromptPreview();
   applySheetLockState();
+  setStructuredSchemaCollapsed(isActiveSheetLocked());
   isRenderingSheet = false;
 }
 
@@ -678,7 +712,14 @@ async function saveActiveSheet(options = {}) {
 
 async function deleteActiveSheet() {
   if (!activeSheet) return;
-  if (!window.confirm(`Delete worksheet "${activeSheet.name}"? Existing rows for this sheet will be removed.`)) return;
+  const confirmed = await CEREBROUI.confirm({
+    title: "Delete structured worksheet",
+    message: `Delete ${activeSheet.name || "this worksheet"}?`,
+    details: ["Its parsed rows and parse errors will be removed from this workbook."],
+    confirmLabel: "Delete worksheet",
+    danger: true,
+  });
+  if (!confirmed) return;
   const response = await fetch(withProject(`/api/structured/sheets/${encodeURIComponent(activeSheet.sheet_id)}`), { method: "DELETE" });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -927,37 +968,14 @@ function applySheetImport(payload) {
 function confirmImportOverwrite(conflicts) {
   const fields = conflicts.fields || [];
   const columns = conflicts.columns || [];
-  const parts = [];
-  if (fields.length) parts.push(`<li>Fields: ${escapeHtml(fields.join(", "))}</li>`);
-  if (columns.length) parts.push(`<li>Columns: ${columns.map((column) => `"${escapeHtml(column)}"`).join(", ")}</li>`);
-  const overlay = document.createElement("div");
-  overlay.className = "modal-overlay";
-  overlay.innerHTML = `
-    <div class="modal-panel structured-confirm-modal">
-      <div class="modal-head">
-        <div>
-          <p class="eyebrow">Overwrite existing sheet data</p>
-          <h2>Import conflicts found</h2>
-        </div>
-      </div>
-      <p>The following fields already exist:</p>
-      <ul class="import-conflict-list">${parts.join("")}</ul>
-      <div class="form-footer">
-        <button type="button" data-action="cancel">Cancel</button>
-        <button type="button" data-action="overwrite">Overwrite</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-  return new Promise((resolve) => {
-    overlay.querySelector("[data-action='cancel']").addEventListener("click", () => {
-      overlay.remove();
-      resolve(false);
-    });
-    overlay.querySelector("[data-action='overwrite']").addEventListener("click", () => {
-      overlay.remove();
-      resolve(true);
-    });
+  const details = [];
+  if (fields.length) details.push(`Fields: ${fields.join(", ")}`);
+  if (columns.length) details.push(`Columns: ${columns.map((column) => `"${column}"`).join(", ")}`);
+  return CEREBROUI.confirm({
+    title: "Import conflicts found",
+    message: "The following information already exists in this sheet. Overwrite it with the imported text?",
+    details,
+    confirmLabel: "Overwrite",
   });
 }
 
@@ -980,6 +998,15 @@ async function submitStructuredJobs() {
   if (!files.length) {
     setStatus("Choose at least one PDF.", "failed");
     return;
+  }
+  if (!isActiveSheetLocked()) {
+    const confirmed = await CEREBROUI.confirm({
+      title: "Run and lock this sheet",
+      message: `Queue ${files.length} PDF${files.length === 1 ? "" : "s"} using ${activeSheet.name || "this sheet"}?`,
+      details: ["The sheet schema becomes read-only when the first job is queued.", "Duplicate the sheet later to test a different schema."],
+      confirmLabel: "Run and lock sheet",
+    });
+    if (!confirmed) return;
   }
   runStructuredButton.disabled = true;
   try {
@@ -1063,61 +1090,124 @@ function displayUploadName(file) {
 }
 
 function startPolling() {
-  if (pollingTimer) return;
-  pollingTimer = window.setInterval(async () => {
-    await refreshJobs();
-    await loadRows(visibleOffset(), { force: true });
-  }, 3000);
+  scheduleStructuredPolling(0);
 }
 
-async function refreshJobs() {
-  const response = await fetch(withProject("/api/structured/jobs"));
+function scheduleStructuredPolling(delay = null) {
+  window.clearTimeout(pollingTimer);
+  const active = Boolean(
+    structuredJobCounts.running ||
+    structuredJobCounts.queued ||
+    structuredQueueState.pending_count ||
+    structuredQueueState.openai_pending_count ||
+    structuredQueueState.openai_running_count ||
+    (structuredQueueState.current_job_ids || []).length
+  );
+  const nextDelay = delay ?? (document.hidden ? 30000 : active ? 3000 : 15000);
+  pollingTimer = window.setTimeout(async () => {
+    await refreshJobs(structuredJobWindow.offset >= 0 ? structuredJobWindow.offset : 0, { force: true });
+    await loadRows(visibleOffset(), { force: true });
+    scheduleStructuredPolling();
+  }, nextDelay);
+}
+
+async function refreshJobs(offset = structuredJobsVisibleOffset(), options = {}) {
+  const safeOffset = Math.max(0, Number(offset || 0));
+  const sheetId = activeSheet?.sheet_id || "";
+  const requestKey = `${sheetId}:${safeOffset}`;
+  if (!options.force && requestKey === structuredJobRequestKey) return;
+  if (!options.force && structuredJobWindow.offset <= safeOffset && safeOffset < structuredJobWindow.offset + Math.max(1, structuredJobWindow.limit - 30)) return;
+  structuredJobRequestKey = requestKey;
+  const params = new URLSearchParams({
+    project_id: currentProjectId,
+    sheet_id: sheetId,
+    offset: String(safeOffset),
+    limit: String(STRUCTURED_JOB_WINDOW_LIMIT),
+  });
+  const response = await fetch(`/api/structured/jobs?${params.toString()}`);
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     setStatus(payload.detail || "Could not load structured jobs.", "failed");
     return;
   }
-  jobs = payload.jobs || [];
+  jobs = payload.items || payload.jobs || [];
+  structuredJobWindow = {
+    offset: Number(payload.offset || 0),
+    limit: Number(payload.limit || STRUCTURED_JOB_WINDOW_LIMIT),
+    total: Number(payload.total || 0),
+    items: jobs,
+    sheetId,
+  };
+  structuredJobCounts = { ...structuredJobCounts, ...(payload.counts || {}) };
+  structuredQueueState = payload.queue || {};
   renderJobs(payload.queue || {});
+  if (structuredJobCounts.all && !structuredSetupBody.classList.contains("setup-initialized")) {
+    setStructuredSetupCollapsed(true);
+    structuredSetupBody.classList.add("setup-initialized");
+  }
 }
 
 function renderJobs(queue) {
   const running = Number(queue.openai_running_count || 0) + Number(queue.current_job_ids?.length || (queue.current_job_id ? 1 : 0));
   const pending = Number(queue.pending_count || 0) + Number(queue.openai_pending_count || 0);
-  const completed = jobs.filter((job) => (job.status || {}).status === "complete").length;
-  const failed = jobs.filter((job) => (job.status || {}).status === "failed").length;
-  structuredQueueBadge.textContent = `${jobs.length} job${jobs.length === 1 ? "" : "s"}`;
+  const completed = Number(structuredJobCounts.completed || 0);
+  const failed = Number(structuredJobCounts.failed || 0) + Number(structuredJobCounts.parse_error || 0);
+  structuredQueueBadge.textContent = `${Number(structuredJobCounts.all || 0).toLocaleString()} job${structuredJobCounts.all === 1 ? "" : "s"}`;
   structuredQueueBadge.className = `badge ${failed ? "failed" : running ? "running" : pending ? "queued" : completed ? "complete" : ""}`;
-  if (!jobs.length) {
-    structuredJobsList.innerHTML = `<p class="technical-empty">No structured PDF jobs yet.</p>`;
+  structuredJobsTableShell?.setAttribute("aria-rowcount", String(structuredJobWindow.total));
+  structuredJobsSummary.textContent = activeSheet
+    ? `${Number(structuredJobWindow.total).toLocaleString()} jobs for ${activeSheet.name || "this sheet"}; ${Number(structuredJobCounts.parse_error || 0).toLocaleString()} parse errors.`
+    : "Select a sheet to view its jobs.";
+  structuredJobsSpacer.style.height = `${Math.max(1, structuredJobWindow.total) * STRUCTURED_JOB_ROW_HEIGHT}px`;
+  structuredJobsRows.innerHTML = "";
+  if (!structuredJobWindow.total) {
+    structuredJobsSpacer.style.height = "140px";
+    structuredJobsRows.innerHTML = `<p class="structured-job-empty">No structured PDF jobs for this sheet.</p>`;
     return;
   }
-  structuredJobsList.innerHTML = jobs
-    .slice()
-    .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")))
-    .map((job) => {
-      const status = job.status || {};
-      const metadata = job.metadata || {};
-      const parseStatus = metadata.structured_parse_status || "";
-      const parseError = metadata.structured_parse_error || "";
-      return `
-        <div class="structured-job-card ${statusClass(status.status || parseStatus)}">
-          <div>
-            <strong>${escapeHtml(job.filename || metadata.original_filename || job.job_id)}</strong>
-            <span>${escapeHtml([status.status || "queued", metadata.structured_sheet_name || "", metadata.rq_screening_model || ""].filter(Boolean).join(" | "))}</span>
-            ${parseStatus ? `<small>Parse: ${escapeHtml(parseStatus)}${parseError ? ` - ${escapeHtml(parseError)}` : ""}</small>` : ""}
-          </div>
-          <button type="button" data-job-id="${escapeHtml(job.job_id)}">View</button>
-        </div>
-      `;
-    })
-    .join("");
-  structuredJobsList.querySelectorAll("[data-job-id]").forEach((button) => {
-    button.addEventListener("click", () => showJobResult(button.dataset.jobId || ""));
+  structuredJobWindow.items.forEach((job, index) => {
+    const status = job.status || {};
+    const metadata = job.metadata || {};
+    const parseStatus = metadata.structured_parse_status || "Pending";
+    const parseError = metadata.structured_parse_error || "";
+    const row = document.createElement("div");
+    row.className = `structured-job-data-row ${statusClass(status.status || parseStatus)}`;
+    row.style.transform = `translateY(${(structuredJobWindow.offset + index) * STRUCTURED_JOB_ROW_HEIGHT}px)`;
+    row.setAttribute("role", "row");
+    row.innerHTML = `
+      <span class="structured-job-cell" role="gridcell" title="${escapeAttribute(job.filename || metadata.original_filename || job.job_id)}">${escapeHtml(job.filename || metadata.original_filename || job.job_id)}</span>
+      <span class="structured-job-cell" role="gridcell"><span class="status-badge ${statusClass(status.status)}">${escapeHtml(status.status || "queued")}</span></span>
+      <span class="structured-job-cell" role="gridcell" title="${escapeAttribute(parseError)}"><span class="status-badge ${statusClass(parseStatus)}">${escapeHtml(parseStatus)}</span></span>
+      <span class="structured-job-cell" role="gridcell" title="${escapeAttribute(metadata.rq_screening_model || "")}">${escapeHtml(metadata.rq_screening_model || "Not recorded")}</span>
+      <span class="structured-job-cell structured-job-action" role="gridcell"><button type="button" data-job-id="${escapeAttribute(job.job_id)}">View</button></span>
+    `;
+    row.querySelector("[data-job-id]")?.addEventListener("click", (event) => showJobResult(job.job_id, event.currentTarget));
+    structuredJobsRows.appendChild(row);
   });
 }
 
+function structuredJobsVisibleOffset() {
+  return Math.max(0, Math.floor((structuredJobsList?.scrollTop || 0) / STRUCTURED_JOB_ROW_HEIGHT) - STRUCTURED_JOB_OVERSCAN);
+}
+
+function setStructuredSetupCollapsed(collapsed) {
+  structuredSetupBody?.classList.toggle("hidden", collapsed);
+  toggleStructuredSetupButton?.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  if (toggleStructuredSetupButton) toggleStructuredSetupButton.textContent = collapsed ? "Configure new run" : "Hide setup";
+}
+
+function setStructuredSchemaCollapsed(collapsed) {
+  structuredSchemaFields?.classList.toggle("hidden", collapsed);
+  structuredColumnInstructions?.classList.toggle("hidden", collapsed);
+  toggleStructuredSchemaButton?.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  if (toggleStructuredSchemaButton) toggleStructuredSchemaButton.textContent = collapsed ? "View schema details" : "Hide schema details";
+}
+
 async function loadRows(offset = visibleOffset(), options = {}) {
+  if ((activeSheet?.sheet_id || "") !== structuredJobWindow.sheetId) {
+    structuredJobsList.scrollTop = 0;
+    await refreshJobs(0, { force: true });
+  }
   if (!activeSheet?.sheet_id) {
     rowWindow = { offset: 0, limit: WINDOW_LIMIT, items: [], total: 0, search: "", sheetId: "" };
     renderRows();
@@ -1315,40 +1405,23 @@ function excelColumnLabel(index) {
   return label;
 }
 
-async function showJobResult(jobId) {
+async function showJobResult(jobId, trigger) {
   if (!jobId) return;
-  const overlay = document.createElement("div");
-  overlay.className = "modal-overlay";
-  overlay.innerHTML = `
-    <div class="modal-panel structured-result-modal">
-      <div class="modal-head">
-        <div>
-          <p class="eyebrow">Structured job</p>
-          <h2>Job output</h2>
-        </div>
-        <button class="icon-button" type="button" data-action="close" aria-label="Close" title="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
-      </div>
-      <p class="technical-empty">Loading...</p>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-  overlay.querySelector("[data-action='close']").addEventListener("click", () => overlay.remove());
+  const inspector = CEREBROUI.openInspector({
+    kicker: "Structured PDF job",
+    title: "Job output",
+    subtitle: jobId,
+    trigger,
+  });
   const response = await fetch(withProject(`/api/structured/jobs/${encodeURIComponent(jobId)}/result`));
   const payload = await response.json().catch(() => ({}));
-  const panel = overlay.querySelector(".modal-panel");
   if (!response.ok) {
-    panel.innerHTML = `<p class="technical-empty">${escapeHtml(payload.detail || "Could not load job result.")}</p>`;
+    inspector.setContent(`<p class="queue-error">${escapeHtml(payload.detail || "Could not load job result.")}</p>`);
     return;
   }
   const metadata = payload.metadata || {};
-  panel.innerHTML = `
-    <div class="modal-head">
-      <div>
-        <p class="eyebrow">${escapeHtml(metadata.original_filename || jobId)}</p>
-        <h2>Structured job output</h2>
-      </div>
-      <button class="icon-button" type="button" data-action="close" aria-label="Close" title="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
-    </div>
+  inspector.setSubtitle(metadata.original_filename || jobId);
+  inspector.setContent(`
     <div class="structured-result-stack">
       <p><strong>Parse status:</strong> ${escapeHtml(metadata.structured_parse_status || "pending")}</p>
       ${metadata.structured_parse_error ? `<p class="queue-error">${escapeHtml(metadata.structured_parse_error)}</p>` : ""}
@@ -1357,8 +1430,7 @@ async function showJobResult(jobId) {
       <details><summary>Parse errors JSON</summary><pre>${escapeHtml(JSON.stringify(payload.parse_errors || [], null, 2))}</pre></details>
       <details><summary>Compiled prompt</summary><pre>${escapeHtml(payload.system_prompt || "")}</pre></details>
     </div>
-  `;
-  panel.querySelector("[data-action='close']").addEventListener("click", () => overlay.remove());
+  `);
 }
 
 function collectColumnsFromState() {
@@ -1475,11 +1547,11 @@ function scheduleAutosave() {
 }
 
 function openModal(modal) {
-  modal?.classList.remove("hidden");
+  CEREBROUI.showDialog(modal, { closeOnBackdrop: true });
 }
 
 function closeModal(modal) {
-  modal?.classList.add("hidden");
+  CEREBROUI.hideDialog(modal);
 }
 
 function setStatus(message, tone) {

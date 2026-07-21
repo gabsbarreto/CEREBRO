@@ -103,11 +103,23 @@ class SharedHelperTests(unittest.TestCase):
         finally:
             openai_rq.OPENAI_API_KEY_FILE = original_key_file
 
-    def test_gpt54_mini_high_preset_is_public_openai_model(self) -> None:
-        settings = JobSettings.from_form({"rq_model_preset": "openai_gpt54_mini_high"})
+    def test_gpt54_mini_xhigh_preset_is_public_openai_model(self) -> None:
+        settings = JobSettings.from_form({"rq_model_preset": "openai_gpt54_mini_xhigh"})
         self.assertEqual(settings.rq_provider, "openai")
         self.assertEqual(settings.rq_screening_model, "gpt-5.4-mini")
         self.assertTrue(settings.rq_enable_thinking)
+        self.assertEqual(settings.openai_reasoning_effort, "xhigh")
+
+        public_presets = {preset["id"]: preset for preset in public_model_presets()}
+        self.assertIn("openai_gpt54_mini_xhigh", public_presets)
+        self.assertEqual(public_presets["openai_gpt54_mini_xhigh"]["settings"]["model"], "gpt-5.4-mini")
+        self.assertEqual(public_presets["openai_gpt54_mini_xhigh"]["settings"]["openai_reasoning_effort"], "xhigh")
+
+    def test_gpt54_mini_high_preset_is_separate_public_option(self) -> None:
+        settings = JobSettings.from_form({"rq_model_preset": "openai_gpt54_mini_high"})
+        self.assertEqual(settings.rq_provider, "openai")
+        self.assertEqual(settings.rq_screening_model, "gpt-5.4-mini")
+        self.assertEqual(settings.rq_model_preset, "openai_gpt54_mini_high")
         self.assertEqual(settings.openai_reasoning_effort, "high")
 
         public_presets = {preset["id"]: preset for preset in public_model_presets()}
@@ -115,11 +127,27 @@ class SharedHelperTests(unittest.TestCase):
         self.assertEqual(public_presets["openai_gpt54_mini_high"]["settings"]["model"], "gpt-5.4-mini")
         self.assertEqual(public_presets["openai_gpt54_mini_high"]["settings"]["openai_reasoning_effort"], "high")
 
-    def test_gpt54_mini_high_preset_aliases_to_mini_high(self) -> None:
-        settings = JobSettings.from_form({"rq_model_preset": "openai_gpt54_mini_high"})
+    def test_gpt54_nano_xhigh_preset_is_public_and_respects_model_limit(self) -> None:
+        settings = JobSettings.from_form({"rq_model_preset": "openai_gpt54_nano_xhigh"})
+        self.assertEqual(settings.rq_provider, "openai")
+        self.assertEqual(settings.rq_screening_model, "gpt-5.4-nano")
+        self.assertEqual(settings.rq_model_preset, "openai_gpt54_nano_xhigh")
+        self.assertTrue(settings.rq_enable_thinking)
+        self.assertEqual(settings.openai_reasoning_effort, "xhigh")
+        self.assertEqual(settings.rq_max_tokens, 128_000)
+
+        public_presets = {preset["id"]: preset for preset in public_model_presets()}
+        self.assertIn("openai_gpt54_nano_xhigh", public_presets)
+        self.assertEqual(public_presets["openai_gpt54_nano_xhigh"]["settings"]["model"], "gpt-5.4-nano")
+        self.assertEqual(public_presets["openai_gpt54_nano_xhigh"]["settings"]["max_tokens"], 128_000)
+        self.assertEqual(public_presets["openai_gpt54_nano_xhigh"]["settings"]["openai_reasoning_effort"], "xhigh")
+
+    def test_gpt54_mini_superseded_preset_family_resolves_to_xhigh(self) -> None:
+        settings = JobSettings.from_form({"rq_model_preset": "openai_gpt54_mini_previous"})
         self.assertEqual(settings.rq_provider, "openai")
         self.assertEqual(settings.rq_screening_model, "gpt-5.4-mini")
-        self.assertEqual(settings.openai_reasoning_effort, "high")
+        self.assertEqual(settings.rq_model_preset, "openai_gpt54_mini_xhigh")
+        self.assertEqual(settings.openai_reasoning_effort, "xhigh")
 
     def test_openai_pdf_file_mode_is_openai_only(self) -> None:
         openai_settings = JobSettings.from_form(
@@ -151,7 +179,7 @@ class SharedHelperTests(unittest.TestCase):
                 output_file=Path("out.md"),
                 max_tokens=100,
                 enable_reasoning=True,
-                reasoning_effort="high",
+                reasoning_effort="xhigh",
                 input_file_id="file-abc",
             )
         finally:
@@ -160,6 +188,7 @@ class SharedHelperTests(unittest.TestCase):
         cmd = calls[0]["cmd"]
         self.assertIn("--input-file-id", cmd)
         self.assertEqual(cmd[cmd.index("--input-file-id") + 1], "file-abc")
+        self.assertEqual(cmd[cmd.index("--reasoning-effort") + 1], "xhigh")
 
 
 class JobIdentityTests(unittest.TestCase):
@@ -1378,6 +1407,81 @@ Rules ###
                 self.assertIn("/rq-screening", wrong_type_response.headers["location"])
         finally:
             config.PROJECTS_DIR = original_projects_dir
+
+
+class UsabilityServiceTests(unittest.TestCase):
+    def test_pdf_job_window_filters_counts_and_bounds_results(self) -> None:
+        from app.services import projects
+
+        original_projects_dir = config.PROJECTS_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config.PROJECTS_DIR = Path(tmpdir) / "projects"
+                config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+                project = projects.create_project("Windowed PDF", "", "pdf")
+                project_id = str(project["project_id"])
+                for index, (filename, status) in enumerate(
+                    [("alpha.pdf", "complete"), ("beta.pdf", "failed"), ("gamma.pdf", "queued")]
+                ):
+                    job_id = f"job-{index}"
+                    root = jobs.create_job(job_id, filename, JobSettings(), project_id=project_id)
+                    jobs.update_metadata(root, rq_prompt_filename="prompt.txt", rq_screening_model="model")
+                    jobs.update_status(
+                        job_id,
+                        status=status,
+                        stage="complete" if status == "complete" else status,
+                        message=status,
+                        progress=1.0 if status in {"complete", "failed"} else 0.0,
+                        project_id=project_id,
+                    )
+
+                payload = jobs.list_jobs_window(project_id=project_id, offset=0, limit=1, status="completed", search="alpha")
+                self.assertEqual(payload["total"], 1)
+                self.assertEqual(len(payload["items"]), 1)
+                self.assertEqual(payload["items"][0]["filename"], "alpha.pdf")
+                self.assertEqual(payload["counts"], {"all": 3, "running": 0, "queued": 1, "completed": 1, "failed": 1})
+                self.assertEqual([item["filename"] for item in payload["active_items"]], ["gamma.pdf"])
+        finally:
+            config.PROJECTS_DIR = original_projects_dir
+
+    def test_structured_job_window_is_sheet_scoped(self) -> None:
+        from app.services import projects, structured_extraction
+
+        original_projects_dir = config.PROJECTS_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config.PROJECTS_DIR = Path(tmpdir) / "projects"
+                config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+                project = projects.create_project("Windowed structured", "", "pdf_structured")
+                project_id = str(project["project_id"])
+                columns = [{"column_name": "Finding", "question": "State the finding.", "rules": ""}]
+                first = structured_extraction.create_sheet(project_id=project_id, name="First", columns=columns)
+                second = structured_extraction.create_sheet(project_id=project_id, name="Second", columns=columns)
+                for index, sheet in enumerate([first, second]):
+                    job_id = f"structured-{index}"
+                    root = jobs.create_job(job_id, f"paper-{index}.pdf", JobSettings(), project_id=project_id)
+                    jobs.update_metadata(
+                        root,
+                        extraction_type="pdf_structured",
+                        structured_sheet_id=sheet["sheet_id"],
+                        structured_sheet_name=sheet["name"],
+                    )
+                payload = structured_extraction.list_structured_jobs_window(project_id, sheet_id=str(first["sheet_id"]), limit=10)
+                self.assertEqual(payload["total"], 1)
+                self.assertEqual(payload["items"][0]["filename"], "paper-0.pdf")
+        finally:
+            config.PROJECTS_DIR = original_projects_dir
+
+    def test_spreadsheet_inspection_returns_headers_and_small_preview(self) -> None:
+        from app.services import text_extraction
+
+        class Upload:
+            filename = "records.csv"
+            file = BytesIO(b"study_id,title,abstract\nS1,One,First abstract\nS2,Two,Second abstract\n")
+
+        payload = text_extraction.inspect_spreadsheet_upload(Upload(), preview_limit=1)
+        self.assertEqual(payload["columns"], ["study_id", "title", "abstract"])
+        self.assertEqual(payload["preview_rows"], [{"study_id": "S1", "title": "One", "abstract": "First abstract"}])
 
 
 class BackendSmokeTests(unittest.TestCase):

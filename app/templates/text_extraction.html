@@ -94,14 +94,26 @@
               <div class="subsection-title"><span>Project column mapping</span></div>
               <label class="field">
                 <span>Study ID column</span>
-                <input id="studyIdColumnInput" type="text" placeholder="study_id, doi, title..." />
+                <select id="studyIdColumnInput" disabled>
+                  <option value="">Use spreadsheet row number</option>
+                </select>
               </label>
               <div id="columnMappings" class="column-mappings" aria-label="Column mappings"></div>
               <button id="addMappingButton" class="add-field-button" type="button">+ Add column mapping</button>
             </div>
+            <div id="spreadsheetPreviewPanel" class="settings-card span-2 spreadsheet-preview-card hidden">
+              <div class="subsection-title">
+                <span>Detected spreadsheet preview</span>
+                <small id="spreadsheetInspectionSummary"></small>
+              </div>
+              <div id="spreadsheetPreviewTable" class="spreadsheet-preview-table"></div>
+            </div>
           </div>
           <div class="form-footer">
-            <div class="queue-hint">The selected input columns are shared by every sheet in this project.</div>
+            <div>
+              <div id="sourceInspectionStatus" class="queue-hint">Choose a spreadsheet to inspect its headers.</div>
+              <div class="queue-hint">Creating the workbook permanently freezes the source and selected input columns for this project.</div>
+            </div>
             <button id="createTextWorkbookButton" type="submit">Create workbook</button>
           </div>
         </form>
@@ -141,6 +153,11 @@
 
         <div id="textSheetLockNotice" class="sheet-lock-notice hidden">This sheet has been run and is locked. Duplicate it to change the prompt or model.</div>
         <form id="textSheetForm" class="text-sheet-editor">
+          <div class="text-sheet-editor-toolbar">
+            <div id="textSheetProvenanceSummary" class="queue-hint"></div>
+            <button id="toggleTextSheetSetupButton" class="secondary-button" type="button" aria-expanded="true" aria-controls="textSheetSetupBody">Hide prompt and settings</button>
+          </div>
+          <div id="textSheetSetupBody">
           <div class="text-sheet-settings-row">
             <label class="field text-sheet-name-field">
               <span>Sheet name</span>
@@ -183,17 +200,21 @@
             <div id="textSheetSaveStatus" class="queue-hint">Sheet changes save automatically.</div>
             <button id="runTextSheetButton" type="submit">Run this sheet</button>
           </div>
+          </div>
         </form>
 
         <div id="textCounts" class="batch-stats" aria-label="Text extraction summary"></div>
         <div class="text-workbook-queue-controls">
-          <div class="icon-control-row">
-            <button id="pauseTextQueueButton" class="icon-button" type="button" aria-label="Pause text queue" title="Pause after active rows finish">
+          <div>
+            <p class="queue-scope-note">Shared text queue: pause and resume affect text jobs in every project.</p>
+            <div class="icon-control-row">
+            <button id="pauseTextQueueButton" class="icon-button" type="button" aria-label="Pause all text processing" title="Pause text processing across every project after active rows finish">
               <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="5" width="3.5" height="14" rx="1"></rect><rect x="13.5" y="5" width="3.5" height="14" rx="1"></rect></svg>
             </button>
-            <button id="resumeTextQueueButton" class="icon-button" type="button" aria-label="Resume text queue" title="Resume text queue">
+            <button id="resumeTextQueueButton" class="icon-button" type="button" aria-label="Resume all text processing" title="Resume text processing across every project">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10-6.5z"></path></svg>
             </button>
+            </div>
           </div>
           <button id="retryFailedRowsButton" type="button">Retry failed rows</button>
         </div>
@@ -217,9 +238,9 @@
           <p id="textFilterSummaryLine" class="filter-summary">Showing all rows.</p>
         </div>
 
-        <div id="textWorkbookTableShell" class="text-workbook-table-shell">
-          <div id="textWorkbookHeader" class="text-workbook-header" aria-hidden="true"></div>
-          <div id="textTableViewport" class="text-workbook-viewport" tabindex="0">
+        <div id="textWorkbookTableShell" class="text-workbook-table-shell" role="grid" aria-label="Text extraction records" aria-rowcount="0">
+          <div id="textWorkbookHeader" class="text-workbook-header" role="rowgroup"></div>
+          <div id="textTableViewport" class="text-workbook-viewport" tabindex="0" role="rowgroup">
             <div id="textVirtualSpacer" class="text-workbook-virtual-spacer"></div>
             <div id="textVirtualRows" class="text-workbook-virtual-rows"></div>
           </div>
@@ -230,6 +251,7 @@
     <input id="currentProjectId" type="hidden" value="{{ current_project.project_id }}" />
     <script id="projectData" type="application/json">{{ projects | tojson }}</script>
     <script id="modelPresetData" type="application/json">{{ model_presets | tojson }}</script>
-    <script src="/static/text_extraction.js?v=20260719-text-workbook"></script>
+    <script src="/static/ui_helpers.js?v=20260720-usability"></script>
+    <script src="/static/text_extraction.js?v=20260720-usability"></script>
   </body>
 </html>

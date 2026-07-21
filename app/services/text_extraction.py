@@ -17,7 +17,7 @@ from typing import Any, Iterable
 from openpyxl import Workbook, load_workbook
 
 from app import config
-from app.models import JobSettings
+from app.models import JobSettings, normalize_selectable_model_preset
 from app.services import jobs, projects
 from app.services.openai_rq import run_openai_rq
 from app.services.rq_llm import run_rq_llm
@@ -375,7 +375,7 @@ def create_text_sheet(
         "source_id": active_source_id,
         "name": clean_name,
         "sheet_order": order,
-        "rq_model_preset": str(rq_model_preset or "qwen35_9b_8bit_reasoning"),
+        "rq_model_preset": normalize_selectable_model_preset(rq_model_preset or "qwen35_9b_8bit_reasoning"),
         "rq_prompt_filename": str(rq_prompt_filename or ""),
         "rq_system_prompt": str(rq_system_prompt or ""),
         "rq_screening_model": "",
@@ -414,7 +414,7 @@ def update_text_sheet(
     existing.update(
         {
             "name": clean_name,
-            "rq_model_preset": str(rq_model_preset or "qwen35_9b_8bit_reasoning"),
+            "rq_model_preset": normalize_selectable_model_preset(rq_model_preset or "qwen35_9b_8bit_reasoning"),
             "rq_prompt_filename": str(rq_prompt_filename or ""),
             "rq_system_prompt": str(rq_system_prompt or ""),
             "updated_at": utc_now(),
@@ -1049,6 +1049,8 @@ def read_text_sheet_file(path: Path) -> dict[str, Any]:
     payload.setdefault("updated_at", "")
     payload.setdefault("locked_at", "")
     payload.setdefault("locked_by_job_id", "")
+    if not str(payload.get("locked_at") or ""):
+        payload["rq_model_preset"] = normalize_selectable_model_preset(str(payload.get("rq_model_preset") or ""))
     payload["is_locked"] = bool(str(payload.get("locked_at") or ""))
     return payload
 
@@ -1141,6 +1143,61 @@ def safe_source_filename(filename: str) -> str:
     stem = projects.sanitize_slug(Path(filename).stem)
     suffix = Path(filename).suffix.lower()
     return f"{stem}{suffix or '.csv'}"
+
+
+def inspect_spreadsheet_upload(upload_file: Any, *, preview_limit: int = 5) -> dict[str, Any]:
+    """Read headers and a small preview without persisting the upload."""
+
+    original_filename = Path(str(upload_file.filename or "uploaded_spreadsheet")).name
+    suffix = Path(original_filename).suffix.lower()
+    if suffix not in {".csv", ".xlsx"}:
+        if suffix == ".xls":
+            raise ValueError("Legacy .xls files are not supported. Save the spreadsheet as .xlsx or CSV and upload again.")
+        raise ValueError("Upload a .csv or .xlsx spreadsheet.")
+
+    handle = upload_file.file
+    handle.seek(0)
+    preview_rows: list[dict[str, str]] = []
+    try:
+        if suffix == ".csv":
+            import io
+
+            text_handle = io.TextIOWrapper(handle, encoding="utf-8-sig", newline="", errors="replace")
+            try:
+                reader = csv.reader(text_handle)
+                try:
+                    columns = normalize_columns(next(reader))
+                except StopIteration:
+                    raise ValueError("Spreadsheet is empty.")
+                for raw_values in reader:
+                    row = {column: stringify_cell(raw_values[index] if index < len(raw_values) else "") for index, column in enumerate(columns)}
+                    if not is_blank_row(row):
+                        preview_rows.append(row)
+                    if len(preview_rows) >= max(1, min(preview_limit, 10)):
+                        break
+            finally:
+                text_handle.detach()
+        else:
+            workbook = load_workbook(handle, read_only=True, data_only=True)
+            try:
+                worksheet = workbook.active
+                row_iterator = worksheet.iter_rows(values_only=True)
+                header = next(row_iterator, None)
+                if header is None:
+                    raise ValueError("Spreadsheet is empty.")
+                columns = normalize_columns([stringify_cell(value) for value in header])
+                for values in row_iterator:
+                    raw_values = list(values or [])
+                    row = {column: stringify_cell(raw_values[index] if index < len(raw_values) else "") for index, column in enumerate(columns)}
+                    if not is_blank_row(row):
+                        preview_rows.append(row)
+                    if len(preview_rows) >= max(1, min(preview_limit, 10)):
+                        break
+            finally:
+                workbook.close()
+    finally:
+        handle.seek(0)
+    return {"filename": original_filename, "columns": columns, "preview_rows": preview_rows}
 
 
 def read_spreadsheet_columns(path: Path) -> list[str]:
