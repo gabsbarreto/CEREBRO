@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use CEREBRO in your research, please cite this software."
+title: "CEREBRO"
+type: software
+authors:
+  - family-names: "Barreto"
+    given-names: "Gabriel Henrique Castanho"
+    orcid: "https://orcid.org/0000-0002-1613-9416"
+repository-code: "https://github.com/gabsbarreto/CEREBRO"
+url: "https://github.com/gabsbarreto/CEREBRO"
+abstract: >-
+  An AI-assisted research application for extracting structured information
+  from scientific PDFs, spreadsheets, and text records using configurable
+  local and API-based OCR and language-model workflows.
+keywords:
+  - "systematic reviews"
+  - "evidence synthesis"
+  - "data extraction"
+  - "document processing"
+  - "artificial intelligence"
+license: "GPL-3.0-only"
