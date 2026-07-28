@@ -18,6 +18,9 @@ GPT54_MINI_HIGH_PRESET_ID = "openai_gpt54_mini_high"
 GPT54_MINI_XHIGH_PRESET_ID = "openai_gpt54_mini_xhigh"
 GPT54_NANO_XHIGH_PRESET_ID = "openai_gpt54_nano_xhigh"
 GPT54_NANO_MAX_OUTPUT_TOKENS = 128_000
+GPT56_LUNA_LOW_PRESET_ID = "openai_gpt56_luna_low"
+GPT56_LUNA_MEDIUM_PRESET_ID = "openai_gpt56_luna_medium"
+GPT56_LUNA_MAX_OUTPUT_TOKENS = 128_000
 
 MODEL_PRESETS: dict[str, dict[str, Any]] = {
     "qwen35_9b_8bit_reasoning": QWEN35_9B_PRESET,
@@ -56,6 +59,22 @@ MODEL_PRESETS: dict[str, dict[str, Any]] = {
         "rq_max_tokens": min(config.OPENAI_RQ_SCREENING_MAX_TOKENS, GPT54_NANO_MAX_OUTPUT_TOKENS),
         "rq_enable_thinking": True,
         "openai_reasoning_effort": "xhigh",
+    },
+    GPT56_LUNA_LOW_PRESET_ID: {
+        "label": "OpenAI gpt-5.6 Luna (light reasoning)",
+        "rq_provider": "openai",
+        "rq_screening_model": "gpt-5.6-luna",
+        "rq_max_tokens": min(config.OPENAI_RQ_SCREENING_MAX_TOKENS, GPT56_LUNA_MAX_OUTPUT_TOKENS),
+        "rq_enable_thinking": True,
+        "openai_reasoning_effort": "low",
+    },
+    GPT56_LUNA_MEDIUM_PRESET_ID: {
+        "label": "OpenAI gpt-5.6 Luna (medium reasoning)",
+        "rq_provider": "openai",
+        "rq_screening_model": "gpt-5.6-luna",
+        "rq_max_tokens": min(config.OPENAI_RQ_SCREENING_MAX_TOKENS, GPT56_LUNA_MAX_OUTPUT_TOKENS),
+        "rq_enable_thinking": True,
+        "openai_reasoning_effort": "medium",
     },
 }
 

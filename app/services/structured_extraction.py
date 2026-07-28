@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -30,6 +31,8 @@ _SECTION_RE = re.compile(r"(?m)^(Column name|Question|Rules)\s*###\s*(.*)$")
 _SHEET_IMPORT_SECTION_RE = re.compile(
     r"(?mi)^(Sheet name|Context|More information / other preferences|More information|Other preferences|Columns)\s*###\s*(.*)$"
 )
+_SHEET_RECORD_LOCKS_GUARD = threading.Lock()
+_SHEET_RECORD_LOCKS: dict[str, threading.RLock] = {}
 
 
 class StructuredParseError(ValueError):
@@ -1107,10 +1110,29 @@ def replace_job_sheet_records(
 ) -> None:
     root = sheet_root(project_id, sheet_id)
     ensure_sheet_data_files(root)
-    existing_rows = [row for row in read_jsonl(root / ROWS_JSONL_FILENAME) if str(row.get("job_id") or "") != job_id]
-    existing_errors = [error for error in read_jsonl(root / ERRORS_JSONL_FILENAME) if str(error.get("job_id") or "") != job_id]
-    write_jsonl(root / ROWS_JSONL_FILENAME, existing_rows + rows)
-    write_jsonl(root / ERRORS_JSONL_FILENAME, existing_errors + errors)
+    # Structured jobs finish concurrently, so the full per-sheet read/replace/write
+    # transaction must be serialized to prevent one completion losing another's rows.
+    with sheet_records_lock(root):
+        existing_rows = [
+            row for row in read_jsonl(root / ROWS_JSONL_FILENAME) if str(row.get("job_id") or "") != job_id
+        ]
+        existing_errors = [
+            error
+            for error in read_jsonl(root / ERRORS_JSONL_FILENAME)
+            if str(error.get("job_id") or "") != job_id
+        ]
+        write_jsonl(root / ROWS_JSONL_FILENAME, existing_rows + rows)
+        write_jsonl(root / ERRORS_JSONL_FILENAME, existing_errors + errors)
+
+
+def sheet_records_lock(root: Path) -> threading.RLock:
+    key = str(root.resolve())
+    with _SHEET_RECORD_LOCKS_GUARD:
+        lock = _SHEET_RECORD_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _SHEET_RECORD_LOCKS[key] = lock
+        return lock
 
 
 def read_sheet_rows(project_id: str, sheet_id: str) -> list[dict[str, Any]]:

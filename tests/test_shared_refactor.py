@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from io import BytesIO
 from pathlib import Path
@@ -141,6 +142,28 @@ class SharedHelperTests(unittest.TestCase):
         self.assertEqual(public_presets["openai_gpt54_nano_xhigh"]["settings"]["model"], "gpt-5.4-nano")
         self.assertEqual(public_presets["openai_gpt54_nano_xhigh"]["settings"]["max_tokens"], 128_000)
         self.assertEqual(public_presets["openai_gpt54_nano_xhigh"]["settings"]["openai_reasoning_effort"], "xhigh")
+
+    def test_gpt56_luna_light_and_medium_presets_are_public(self) -> None:
+        expected_efforts = {
+            "openai_gpt56_luna_low": "low",
+            "openai_gpt56_luna_medium": "medium",
+        }
+        public_presets = {preset["id"]: preset for preset in public_model_presets()}
+
+        for preset_id, effort in expected_efforts.items():
+            with self.subTest(preset_id=preset_id):
+                settings = JobSettings.from_form({"rq_model_preset": preset_id})
+                self.assertEqual(settings.rq_provider, "openai")
+                self.assertEqual(settings.rq_screening_model, "gpt-5.6-luna")
+                self.assertEqual(settings.rq_model_preset, preset_id)
+                self.assertTrue(settings.rq_enable_thinking)
+                self.assertEqual(settings.openai_reasoning_effort, effort)
+                self.assertEqual(settings.rq_max_tokens, 128_000)
+
+                self.assertIn(preset_id, public_presets)
+                self.assertEqual(public_presets[preset_id]["settings"]["model"], "gpt-5.6-luna")
+                self.assertEqual(public_presets[preset_id]["settings"]["max_tokens"], 128_000)
+                self.assertEqual(public_presets[preset_id]["settings"]["openai_reasoning_effort"], effort)
 
     def test_gpt54_mini_superseded_preset_family_resolves_to_xhigh(self) -> None:
         settings = JobSettings.from_form({"rq_model_preset": "openai_gpt54_mini_previous"})
@@ -829,6 +852,61 @@ class StructuredExtractionTests(unittest.TestCase):
                 )
                 self.assertEqual(other_payload["total"], 0)
         finally:
+            config.PROJECTS_DIR = original_projects_dir
+
+    def test_concurrent_job_completions_preserve_every_jobs_rows(self) -> None:
+        from app.services import projects, structured_extraction
+
+        original_projects_dir = config.PROJECTS_DIR
+        original_read_jsonl = structured_extraction.read_jsonl
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config.PROJECTS_DIR = Path(tmpdir) / "projects"
+                config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+                project = projects.create_project("Concurrent structured", "", "pdf_structured")
+                project_id = str(project["project_id"])
+                sheet = structured_extraction.create_sheet(
+                    project_id=project_id,
+                    name="Concurrent sheet",
+                    columns=[{"column_name": "Finding", "question": "State the finding.", "rules": ""}],
+                )
+                sheet_id = str(sheet["sheet_id"])
+                start = threading.Barrier(3)
+                failures: list[BaseException] = []
+
+                def delayed_read_jsonl(path: Path) -> list[dict]:
+                    records = original_read_jsonl(path)
+                    if path.name == structured_extraction.ROWS_JSONL_FILENAME:
+                        time.sleep(0.05)
+                    return records
+
+                def complete(job_id: str) -> None:
+                    try:
+                        start.wait()
+                        structured_extraction.replace_job_sheet_records(
+                            project_id,
+                            sheet_id,
+                            job_id,
+                            [{"row_id": f"row-{job_id}", "job_id": job_id, "cells": {"Finding": job_id}}],
+                            [],
+                        )
+                    except BaseException as exc:
+                        failures.append(exc)
+
+                structured_extraction.read_jsonl = delayed_read_jsonl
+                threads = [threading.Thread(target=complete, args=(job_id,)) for job_id in ("job-a", "job-b")]
+                for thread in threads:
+                    thread.start()
+                start.wait()
+                for thread in threads:
+                    thread.join(timeout=5)
+
+                self.assertFalse(failures)
+                self.assertTrue(all(not thread.is_alive() for thread in threads))
+                rows = structured_extraction.read_sheet_rows(project_id, sheet_id)
+                self.assertEqual({row["job_id"] for row in rows}, {"job-a", "job-b"})
+        finally:
+            structured_extraction.read_jsonl = original_read_jsonl
             config.PROJECTS_DIR = original_projects_dir
 
     def test_structured_sheet_drafts_load_before_questions_are_complete(self) -> None:
