@@ -227,8 +227,7 @@ Model presets currently include:
 - `openai_gpt54_mini_high`: public OpenAI GPT-5.4 mini preset with high reasoning.
 - `openai_gpt54_mini_xhigh`: public OpenAI GPT-5.4 mini preset with xhigh reasoning.
 - `openai_gpt54_nano_xhigh`: public OpenAI GPT-5.4 nano preset with xhigh reasoning and a 128,000-token model limit.
-- `openai_gpt56_luna_low`: public OpenAI GPT-5.6 Luna preset displayed as light reasoning and sent as API effort `low`.
-- `openai_gpt56_luna_medium`: public OpenAI GPT-5.6 Luna preset with medium reasoning.
+- GPT-5.6 Sol, Terra, and Luna are exposed with all supported reasoning efforts: `none`, `low`, `medium`, `high`, `xhigh`, and `max`. Preset IDs use `openai_gpt56_<tier>_<effort>`.
 
 Provider normalization:
 
@@ -1063,7 +1062,7 @@ Covered areas include:
 - OpenAI response parsing.
 - Event subprocess runner.
 - OpenAI API key resolution order.
-- Separate GPT-5.4 mini high/xhigh, GPT-5.4 nano xhigh, and GPT-5.6 Luna light/medium presets.
+- GPT-5.4 mini high/xhigh and GPT-5.4 nano xhigh presets, plus all GPT-5.6 Sol/Terra/Luna reasoning combinations.
 - OpenAI PDF file mode.
 - Job identity matching.
 - OCR and OpenAI file reuse helpers.
@@ -1285,7 +1284,7 @@ These are useful checks for future LLMs before editing:
 - Structured PDF projects use `extraction_type: "pdf_structured"` and route to `/structured-pdf`.
 - `openai_gpt54_mini_high` and `openai_gpt54_mini_xhigh` are public presets for `gpt-5.4-mini` with `high` and `xhigh` reasoning, respectively.
 - `openai_gpt54_nano_xhigh` is a public preset for `gpt-5.4-nano` with `xhigh` reasoning and caps output at the model's 128,000-token limit.
-- `openai_gpt56_luna_low` and `openai_gpt56_luna_medium` are public presets for `gpt-5.6-luna`; UI light reasoning maps to API effort `low`, and both cap output at 128,000 tokens.
+- GPT-5.6 presets cover `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` at `none`, `low`, `medium`, `high`, `xhigh`, and `max`; all cap output at 128,000 tokens.
 - Prompt files are shared globally across projects, not stored per project.
 - Runtime Excel summaries can be rebuilt from active jobs.
 - Structured PDF parse failures still mark the underlying model job complete; the parse status is carried separately in metadata and sheet error records.

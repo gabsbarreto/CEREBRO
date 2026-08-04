@@ -18,9 +18,29 @@ GPT54_MINI_HIGH_PRESET_ID = "openai_gpt54_mini_high"
 GPT54_MINI_XHIGH_PRESET_ID = "openai_gpt54_mini_xhigh"
 GPT54_NANO_XHIGH_PRESET_ID = "openai_gpt54_nano_xhigh"
 GPT54_NANO_MAX_OUTPUT_TOKENS = 128_000
-GPT56_LUNA_LOW_PRESET_ID = "openai_gpt56_luna_low"
-GPT56_LUNA_MEDIUM_PRESET_ID = "openai_gpt56_luna_medium"
-GPT56_LUNA_MAX_OUTPUT_TOKENS = 128_000
+GPT56_MAX_OUTPUT_TOKENS = 128_000
+GPT56_MODEL_TIERS = ("sol", "terra", "luna")
+GPT56_REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
+
+
+def gpt56_model_presets() -> dict[str, dict[str, Any]]:
+    presets: dict[str, dict[str, Any]] = {}
+    for tier in GPT56_MODEL_TIERS:
+        for effort in GPT56_REASONING_EFFORTS:
+            preset_id = f"openai_gpt56_{tier}_{effort}"
+            reasoning_label = "no reasoning" if effort == "none" else f"{effort} reasoning"
+            presets[preset_id] = {
+                "label": f"OpenAI gpt-5.6 {tier.title()} ({reasoning_label})",
+                "rq_provider": "openai",
+                "rq_screening_model": f"gpt-5.6-{tier}",
+                "rq_max_tokens": min(config.OPENAI_RQ_SCREENING_MAX_TOKENS, GPT56_MAX_OUTPUT_TOKENS),
+                # GPT-5.6 defaults to medium if reasoning is omitted, so even
+                # the none preset must send the reasoning field explicitly.
+                "rq_enable_thinking": True,
+                "openai_reasoning_effort": effort,
+            }
+    return presets
+
 
 MODEL_PRESETS: dict[str, dict[str, Any]] = {
     "qwen35_9b_8bit_reasoning": QWEN35_9B_PRESET,
@@ -60,22 +80,7 @@ MODEL_PRESETS: dict[str, dict[str, Any]] = {
         "rq_enable_thinking": True,
         "openai_reasoning_effort": "xhigh",
     },
-    GPT56_LUNA_LOW_PRESET_ID: {
-        "label": "OpenAI gpt-5.6 Luna (light reasoning)",
-        "rq_provider": "openai",
-        "rq_screening_model": "gpt-5.6-luna",
-        "rq_max_tokens": min(config.OPENAI_RQ_SCREENING_MAX_TOKENS, GPT56_LUNA_MAX_OUTPUT_TOKENS),
-        "rq_enable_thinking": True,
-        "openai_reasoning_effort": "low",
-    },
-    GPT56_LUNA_MEDIUM_PRESET_ID: {
-        "label": "OpenAI gpt-5.6 Luna (medium reasoning)",
-        "rq_provider": "openai",
-        "rq_screening_model": "gpt-5.6-luna",
-        "rq_max_tokens": min(config.OPENAI_RQ_SCREENING_MAX_TOKENS, GPT56_LUNA_MAX_OUTPUT_TOKENS),
-        "rq_enable_thinking": True,
-        "openai_reasoning_effort": "medium",
-    },
+    **gpt56_model_presets(),
 }
 
 
