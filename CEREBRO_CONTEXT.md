@@ -32,9 +32,10 @@ Core capabilities:
 
 - Create and switch projects.
 - Store jobs separately by project.
-- Upload PDFs or folders of PDFs.
+- Upload primary PDFs or folders of PDFs, with optional supporting PDF/XLSX/CSV files grouped into a single study bundle.
 - Upload CSV/XLSX files and create one row job per spreadsheet row.
-- Define structured PDF sheets with context, row unit, and ordered columns.
+- Import structured-project PDF study bundles once, then reuse them across several workbooks in the same project.
+- Define structured PDF workbooks and worksheet schemas with context, row unit, and ordered columns.
 - Select saved prompt files or edit a system prompt in the UI.
 - Select local or OpenAI model presets.
 - Run PDF extraction through local OCR plus LLM extraction, or OpenAI PDF file/source mode.
@@ -55,7 +56,7 @@ Each job is a directory containing:
 
 - `metadata.json`: job identity, settings, source file, prompt, model, timing, and output paths.
 - `status.json`: queue/running/completed/failed status, stage, progress, errors, and event history.
-- `input/`: uploaded source file for PDF jobs.
+- `input/`: the primary PDF remains at `input/uploaded.pdf`; supporting sources are kept under `input/attachments/`.
 - `outputs/`: generated prompts, model requests/responses, and final markdown output.
 - Additional workflow folders such as rendered pages, OCR images, OCR text, or text row input.
 
@@ -84,6 +85,8 @@ The project id must be threaded through every project-scoped API call. If a futu
 |   |   |-- rq_completion.py
 |   |   |-- text_extraction.py
 |   |   |-- structured_extraction.py
+|   |   |-- structured_sources.py
+|   |   |-- supplementary_sources.py
 |   |   |-- excel_summary.py
 |   |   |-- rq_prompt.py
 |   |   |-- renderer.py
@@ -108,6 +111,7 @@ The project id must be threaded through every project-scoped API call. If a futu
 |       |-- rq_screening.js
 |       |-- text_extraction.js
 |       |-- structured_pdf.js
+|       |-- study_bundles.js
 |       `-- styles.css
 |-- scripts/
 |   |-- run_batch.py
@@ -139,6 +143,8 @@ data/
 |       |       |-- metadata.json
 |       |       |-- status.json
 |       |       |-- input/
+|       |       |   |-- uploaded.pdf
+|       |       |   `-- attachments/
 |       |       |-- rendered_pages/
 |       |       |-- ocr_images/
 |       |       |-- ocr_text/
@@ -148,6 +154,15 @@ data/
 |       |       |-- source.json
 |       |       |-- rows.jsonl
 |       |       `-- <uploaded_spreadsheet>.csv|xlsx
+|       |-- structured_sources/
+|       |   `-- <source_id>/
+|       |       |-- source.json
+|       |       `-- input/
+|       |           |-- uploaded.pdf
+|       |           `-- attachments/
+|       |-- structured_workbooks/
+|       |   `-- <workbook_id>/
+|       |       `-- workbook.json
 |       |-- structured_sheets/
 |       |   `-- <sheet_id>/
 |       |       |-- sheet.json
@@ -166,7 +181,10 @@ Important runtime rules:
 - `data/jobs/` is legacy storage.
 - `data/projects/<project_id>/jobs/` is the active project-scoped job store.
 - `data/projects/<project_id>/excluded_jobs/` is used locally for archived duplicate jobs that should not appear in the UI/export.
-- `data/projects/<project_id>/structured_sheets/` stores structured PDF sheet schemas, parsed rows, and parse errors.
+- `data/projects/<project_id>/structured_sources/` stores reusable primary-PDF/supporting-file study bundles for structured PDF projects.
+- `data/projects/<project_id>/structured_workbooks/` stores ordered workbook metadata. Each structured sheet keeps its own folder and is linked to a workbook through `sheet.json.workbook_id`.
+- `data/projects/<project_id>/structured_sheets/` stores structured PDF sheet schemas, parsed rows, and parse errors. Existing sheets without a `workbook_id` are assigned safely to `Workbook 1` on first structured workbook access; their folders, rows, errors, jobs, and ids are not moved.
+- PDF job metadata has an ordered `source_files` manifest and `source_bundle_sha256` when a study has supporting sources.
 - `data/prompts/` stores prompt files used by both PDF and text workflows.
 - `data/api_key.txt` is an optional local OpenAI API key fallback.
 - Do not force-add `data/` to Git. It can contain PDFs, extracted text, API logs, outputs, and sensitive review data.
@@ -354,20 +372,28 @@ GET  /api/reports/excel
 Structured PDF extraction API:
 
 ```text
+GET    /api/structured/workbooks
+POST   /api/structured/workbooks
+POST   /api/structured/workbooks/{workbook_id}/duplicate
 GET    /api/structured/sheets
 POST   /api/structured/sheets
 GET    /api/structured/sheets/{sheet_id}
 GET    /api/structured/sheets/{sheet_id}/import-text
+GET    /api/structured/workbook/import-text
 PUT    /api/structured/sheets/{sheet_id}
 DELETE /api/structured/sheets/{sheet_id}
 POST   /api/structured/sheets/parse-import
 POST   /api/structured/sheets/{sheet_id}/duplicate
 POST   /api/structured/workbook/duplicate
 POST   /api/structured/columns/parse-blocks
+GET    /api/structured/sources
+POST   /api/structured/sources
+DELETE /api/structured/sources/{source_id}
 POST   /api/structured/jobs
 GET    /api/structured/jobs
 GET    /api/structured/jobs/{job_id}/result
 GET    /api/structured/rows
+GET    /api/structured/sheets/{sheet_id}/export
 GET    /api/structured/export
 ```
 
@@ -380,6 +406,7 @@ GET  /api/text/jobs/counts
 GET  /api/text/jobs/{job_id}/output
 POST /api/text/jobs/{job_id}/retry
 POST /api/text/jobs/retry-failed
+GET  /api/text/sheets/{sheet_id}/export
 GET  /api/text/export
 ```
 
@@ -408,7 +435,7 @@ Main files:
 User flow:
 
 1. User selects a PDF project.
-2. User uploads one or more PDFs, or a folder containing PDFs.
+2. User uploads one or more primary PDFs, or a folder containing PDFs, and can attach PDF/XLSX/CSV supporting files to each primary article.
 3. User selects model preset.
 4. If OpenAI preset is selected, OpenAI API key field appears.
 5. If OpenAI preset is selected, user can choose OpenAI PDF file/source extraction.
@@ -422,27 +449,28 @@ User flow:
 
 PDF job creation details:
 
-- `POST /api/jobs` accepts `pdfs`, optional `pdf`, `pdf_relative_paths`, `project_id`, settings, prompt filename, prompt text, and `rerun_existing`.
+- `POST /api/jobs` accepts `pdfs`, optional `pdf`, `pdf_relative_paths`, optional `attachments`, `attachment_primary_indices`, `attachment_relative_paths`, `project_id`, settings, prompt filename, prompt text, and `rerun_existing`.
 - Job filename shown in UI comes from upload basename.
 - Folder-relative path is stored in metadata as `source_relative_path`.
 - Source folder is stored as `source_folder`.
 - Uploaded file is saved as `input/uploaded.pdf`.
+- Supporting files are saved as `input/attachments/<ordered-name>` and described in ordered `source_files` metadata records.
 - SHA-256 is stored as `pdf_sha256`.
+- A complete bundle SHA-256 is stored as `source_bundle_sha256` when supporting files are present.
 - Duplicate detection is scoped to current project and run identity:
   - filename
   - prompt filename
   - model
   - OpenAI input mode
-- Reusable OCR is looked up by filename in current project.
-- Reusable OpenAI file id is looked up by SHA-256 or basename in current project.
+- Reusable OCR and OpenAI file IDs are matched within the current project and require the same complete source bundle when one is present.
 
 PDF pipeline stages:
 
-1. `upload`: validate saved PDF.
-2. `render`: render pages with `pypdfium2` into images.
+1. `upload`: validate and persist the study bundle.
+2. `render`: render the primary and any supporting PDFs with `pypdfium2` into images.
 3. `find_deepseek`: discover or use configured DeepSeekOCR2 model.
 4. `ocr`: run OCR worker on rendered page images.
-5. `merge`: merge OCR page markdown into `outputs/merged_full_text.txt`.
+5. `merge`: merge OCR page markdown into `outputs/merged_full_text.txt`, then append bounded transcripts of supporting CSV/XLSX files.
 6. `prompt`: load or use system prompt and write:
    - `outputs/rq_prompt.txt`
    - `outputs/rq_system_prompt.txt`
@@ -455,14 +483,14 @@ OpenAI PDF file/source mode:
 - Applies only when provider is OpenAI and `openai_input_mode == "pdf_file"`.
 - Skips local OCR.
 - Counts pages if possible.
-- User prompt says to use the attached PDF and consider text, tables, figures, charts, captions, and appendices.
-- OpenAI file id can be reused when the same PDF hash has already been uploaded.
+- User prompt says to use the primary PDF and every attached supporting source, including tables, figures, charts, captions, appendices, and supplementary data.
+- Every source file in a bundle is sent in the same request. IDs can be reused only when they cover the same complete bundle.
 
 Local OCR/text mode:
 
-- Renders PDF pages.
+- Renders primary and supporting PDF pages.
 - Runs DeepSeekOCR2.
-- Merges OCR markdown.
+- Merges OCR markdown and supporting spreadsheet transcripts.
 - Sends merged text as the LLM user prompt.
 
 Rerun behavior:
@@ -622,13 +650,14 @@ Main files:
 - `app/templates/structured_pdf.html`
 - `app/static/structured_pdf.js`
 - `app/services/structured_extraction.py`
+- `app/services/structured_sources.py`
 - `app/services/rq_completion.py`
 
 User flow:
 
 1. User creates/selects a `pdf_structured` project.
-2. The dashboard opens with PDF intake first, then a workbook schema/spreadsheet panel, then diagnostics.
-3. The workbook panel has sheet tabs and a `+` sheet button, similar to Excel.
+2. The dashboard opens on a project-level `PDF library` tab, where primary PDFs and supporting files are imported once as reusable study bundles.
+3. The `Workbooks` tab lets the user select or create an extraction workbook. Each workbook has sheet tabs and a `+` sheet button, similar to Excel.
 4. The sheet name, context, and `More information / other preferences` fields sit above the spreadsheet grid.
 5. The user names active columns directly in the spreadsheet header.
 6. Each named column is mirrored into a column instruction card below the grid.
@@ -643,31 +672,34 @@ User flow:
 15. Draft sheets autosave after edits; extraction cannot run until the schema is complete.
 16. A sheet locks as soon as its first structured extraction job is queued. Locked sheets are read-only.
 17. Locked sheets can be duplicated to edit the copied schema. Duplication copies sheet name, context, preferences, and columns, but not rows, parse errors, jobs, or lock metadata.
-18. `Duplicate workbook` opens a sheet checklist and creates a new `pdf_structured` project containing only the selected sheet schemas in source order.
-19. Workbook copies preserve the project description and use the next available `Project name (n)` name. They do not copy PDFs, jobs, rows, errors, outputs, or sheet locks.
-20. The backend compiles the sheet schema into strict TSV extraction instructions.
-21. User uploads one or more PDFs or a folder of PDFs.
-22. Backend creates one PDF job per uploaded file and stores the compiled structured prompt in the job metadata/output prompts.
-23. The existing PDF OCR/OpenAI pipeline runs as usual.
-24. Completion is intercepted for `extraction_type: "pdf_structured"` and parses the model response as TSV.
-25. Parsed rows are appended to the selected sheet's `rows.jsonl`; parse failures are appended to `errors.jsonl`.
-26. The UI shows rows in a fixed-height virtual table and exposes raw output/parse errors per job.
-27. Export creates one Excel worksheet per structured sheet.
+18. `Duplicate workbook` creates another workbook in the same project, copying sheet schemas only. The project-level source library remains shared.
+19. `Duplicate project` opens a sheet checklist and creates a new `pdf_structured` project containing only the selected active-workbook sheet schemas in source order. The copy preserves the project description, uses the next available `Project name (n)` name, and does not copy PDFs, jobs, rows, errors, outputs, or locks.
+20. `Export all sheet prompts` downloads every editable sheet definition in the active workbook order without compiled TSV/model instructions.
+21. The backend compiles the sheet schema into strict TSV extraction instructions.
+22. User imports one or more PDFs or folders to the project PDF library, then selects saved study bundles for the active worksheet run.
+23. Backend creates one PDF job per selected library source and stores the compiled structured prompt, workbook id, sheet id, and source-library provenance in job metadata/output prompts.
+24. The existing PDF OCR/OpenAI pipeline runs as usual.
+25. Completion is intercepted for `extraction_type: "pdf_structured"` and parses the model response as TSV.
+26. Parsed rows are appended to the selected sheet's `rows.jsonl`; parse failures are appended to `errors.jsonl`.
+27. The UI shows rows in a fixed-height virtual table and exposes raw output/parse errors per job.
+28. Export creates one Excel worksheet per sheet in the active workbook.
 
 Current structured PDF panel order:
 
-1. `PDF intake`: file/folder upload, model preset, OpenAI key/file mode, OCR settings, run button.
-2. `Workbook schema`: sheet tabs, sheet name, context, more information/preferences, spreadsheet grid, column instruction cards, generated prompt preview.
-3. `Diagnostics`: structured jobs, parse status, raw output, parsed rows, parse errors.
+1. `PDF library`: file/folder import, optional supporting files, and a visible reusable study-source list.
+2. `Workbooks`: workbook picker and creation/duplication controls, then sheet tabs, schema, source selection, model/OCR settings, and run button.
+3. `Results`: spreadsheet grid with inline structured-job diagnostics, parse status, raw output, parsed rows, and parse errors. Schema and results can be collapsed independently.
 
 Structured sheet import:
 
 - User-facing guide: `STRUCTURED_SHEET_IMPORT_GUIDE.md`.
-- UI actions: `Paste sheet / columns` imports sheet text; `Export sheet text` generates a paste-ready full sheet block for reuse.
+- UI actions: `Paste sheet / columns` imports sheet text; `Export sheet text` exports the active sheet; `Export all sheet prompts` downloads every paste-ready sheet block in workbook order.
 - Backend parser: `structured_extraction.parse_sheet_import()`.
 - Backend exporter: `structured_extraction.format_sheet_import_text()`.
+- Workbook exporter: `structured_extraction.format_workbook_import_text()`; it exports the active workbook only and does not use the compiled extraction prompt.
 - API route: `POST /api/structured/sheets/parse-import`.
 - API route: `GET /api/structured/sheets/{sheet_id}/import-text`.
+- API route: `GET /api/structured/workbook/import-text`.
 - Accepted modes:
   - Full sheet import with `Sheet name ###`, `Context ###`, `More information / other preferences ###`, `Columns ###`, and column blocks.
   - Columns-only import using `Column name ###`, `Question ###`, `Rules ###`, separated by `---`.
@@ -678,10 +710,11 @@ Structured sheet import:
 Structured sheet locking:
 
 - Backend helper: `structured_extraction.lock_sheet_for_first_run(project_id, sheet_id, job_id)`.
-- Duplicate helper: `structured_extraction.duplicate_sheet(project_id, sheet_id)`.
+- Duplicate helper: `structured_extraction.duplicate_sheet(project_id, sheet_id, workbook_id=...)`.
 - Duplicate route: `POST /api/structured/sheets/{sheet_id}/duplicate`.
-- Workbook duplicate helper: `structured_extraction.duplicate_workbook(project_id, sheet_ids)`.
-- Workbook duplicate route: `POST /api/structured/workbook/duplicate`.
+- Same-project workbook duplicate helper: `structured_extraction.duplicate_project_workbook(project_id, workbook_id)`.
+- Same-project workbook duplicate route: `POST /api/structured/workbooks/{workbook_id}/duplicate`.
+- Cross-project copy helper/route: `structured_extraction.duplicate_workbook(project_id, sheet_ids)` / `POST /api/structured/workbook/duplicate`.
 - Lock metadata in `sheet.json`:
 
 ```json
@@ -699,11 +732,22 @@ Structured sheet locking:
 Structured sheet storage:
 
 ```text
-data/projects/<project_id>/structured_sheets/<sheet_id>/
-|-- sheet.json
-|-- rows.jsonl
-`-- errors.jsonl
+data/projects/<project_id>/
+|-- structured_sources/<source_id>/
+|   |-- source.json
+|   `-- input/
+|       |-- uploaded.pdf
+|       `-- attachments/
+|-- structured_workbooks/<workbook_id>/
+|   `-- workbook.json
+`-- structured_sheets/<sheet_id>/
+    |-- sheet.json  # contains workbook_id
+    |-- rows.jsonl
+    `-- errors.jsonl
 ```
+
+- Existing structured projects are migrated lazily: a default `Workbook 1` is created and existing sheets without `workbook_id` are assigned to it in place. Their sheet folders, rows, errors, jobs, and identifiers are preserved.
+- The source library is project-scoped. Selecting a library source copies its complete primary-PDF/supporting-file bundle into the new job, so old and new jobs remain reproducible even if a library source is later removed.
 
 Structured job files include:
 
@@ -736,11 +780,12 @@ TSV parsing:
 
 Structured export:
 
-- `GET /api/structured/export`
+- `GET /api/structured/export?workbook_id=...`
+- `GET /api/structured/sheets/{sheet_id}/export` exports only the selected worksheet with the same columns and row/error records.
 - Workbook file name pattern:
 
 ```text
-cerebro_<project_slug>_structured_pdf_export.xlsx
+cerebro_<project_slug>_<workbook_slug>_structured_pdf_export.xlsx
 ```
 
 - Each worksheet includes:
@@ -902,7 +947,8 @@ Server-side filtering:
 Text export:
 
 - `GET /api/text/export`
-- Creates one worksheet per text extraction sheet in sheet order.
+- `GET /api/text/sheets/{sheet_id}/export` exports only the selected text worksheet.
+- The full export creates one worksheet per text extraction sheet in sheet order.
 - Preserves every original source column in every worksheet, including columns hidden from the browser grid.
 - Appends:
   - `cerebro_extracted_at`
@@ -1371,8 +1417,22 @@ pip install -r requirements.txt
 Run app:
 
 ```bash
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+uvicorn app.main:app --host 127.0.0.1 --port 8001
 ```
+
+For development reloads, exclude runtime data so completed jobs, status files,
+and exports do not restart the server:
+
+```bash
+uvicorn app.main:app --reload --reload-exclude 'data/**' --host 127.0.0.1 --port 8001
+```
+
+Queue restoration happens in a background thread after the HTTP server starts.
+Text extraction creates a project-local `text_row_index.sqlite3` cache from the
+authoritative source JSONL and job records. The frontend polls this index in
+small windows; it never downloads or renders every row at once. While a legacy
+or large project is indexed, the Text dashboard displays restoration progress
+and keeps the source records unchanged.
 
 Run tests:
 

@@ -140,6 +140,7 @@
           </div>
           <div class="actions">
             <button id="duplicateTextSheetButton" type="button">Duplicate sheet</button>
+            <button id="textWorksheetExportButton" type="button" disabled>Export worksheet</button>
             <a id="textExportLink" class="button" href="/api/text/export">Export workbook</a>
           </div>
         </div>
@@ -252,6 +253,6 @@
     <script id="projectData" type="application/json">{{ projects | tojson }}</script>
     <script id="modelPresetData" type="application/json">{{ model_presets | tojson }}</script>
     <script src="/static/ui_helpers.js?v=20260720-usability"></script>
-    <script src="/static/text_extraction.js?v=20260720-usability"></script>
+    <script src="/static/text_extraction.js?v=20260917-queue-index"></script>
   </body>
 </html>

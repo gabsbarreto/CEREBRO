@@ -123,9 +123,12 @@ def find_screened_job_by_run_identity(
     model: str,
     openai_input_mode: str = "ocr_text",
     project_id: str | None = None,
+    source_bundle_sha256: str = "",
 ) -> dict[str, Any] | None:
     for record in find_screened_jobs_by_filename(filename, project_id=project_id):
         metadata = record.get("metadata") or {}
+        if source_bundle_sha256 and str(metadata.get("source_bundle_sha256") or "") != source_bundle_sha256:
+            continue
         if (
             str(metadata.get("rq_prompt_filename") or "") == str(prompt_filename or "")
             and str(metadata.get("rq_screening_model") or "") == str(model or "")
@@ -135,10 +138,17 @@ def find_screened_job_by_run_identity(
     return None
 
 
-def find_reusable_ocr_job_by_filename(filename: str, project_id: str | None = None) -> dict[str, Any] | None:
+def find_reusable_ocr_job_by_filename(
+    filename: str,
+    project_id: str | None = None,
+    source_bundle_sha256: str = "",
+) -> dict[str, Any] | None:
     for record in find_screened_jobs_by_filename(filename, project_id=project_id):
         root = job_dir(str(record["job_id"]), project_id)
         merged = root / "outputs" / "merged_full_text.txt"
+        metadata = record.get("metadata") or {}
+        if source_bundle_sha256 and str(metadata.get("source_bundle_sha256") or "") != source_bundle_sha256:
+            continue
         if merged.exists() and len(merged.read_text(encoding="utf-8").strip()) >= 20:
             return record
     return None
@@ -148,13 +158,25 @@ def find_reusable_openai_file_job(
     pdf_sha256: str,
     filename: str = "",
     project_id: str | None = None,
+    source_bundle_sha256: str = "",
 ) -> dict[str, Any] | None:
     basename = Path(str(filename or "")).name
     for record in list_jobs(limit=0, project_id=project_id):
         metadata = record.get("metadata") or {}
-        file_id = str(metadata.get("openai_file_id") or "")
-        if not file_id:
+        raw_file_ids = [str(value or "").strip() for value in metadata.get("openai_file_ids") or []]
+        if not raw_file_ids and metadata.get("openai_file_id"):
+            raw_file_ids = [str(metadata["openai_file_id"]).strip()]
+        if not raw_file_ids or not all(raw_file_ids):
             continue
+        if source_bundle_sha256:
+            if str(metadata.get("source_bundle_sha256") or "") != source_bundle_sha256:
+                continue
+            if str(metadata.get("openai_source_bundle_sha256") or "") not in {"", source_bundle_sha256}:
+                continue
+            source_root = job_dir(str(record["job_id"]), project_id)
+            if len(raw_file_ids) != len(source_file_records(source_root, metadata)):
+                continue
+            return record
         if pdf_sha256 and str(metadata.get("pdf_sha256") or "") == str(pdf_sha256):
             return record
         original = str(metadata.get("original_filename") or "")
@@ -198,13 +220,11 @@ def create_screening_rerun_child_job(
     filename = str(source_metadata.get("original_filename") or source_pdf.name)
     child_job_id = new_job_id()
     child_root = create_job(child_job_id, filename, settings, project_id=project_id)
-    child_pdf = child_root / "input" / "uploaded.pdf"
-    shutil.copy2(source_pdf, child_pdf)
+    bundle_updates = copy_source_bundle(source_root, child_root)
     update_metadata(
         child_root,
         **settings_metadata_updates(settings),
-        uploaded_pdf=str(child_pdf),
-        pdf_sha256=file_sha256(child_pdf),
+        **bundle_updates,
         rerun_created_from_job_id=source_job_id,
         rerun_requested_at=datetime.now(timezone.utc).isoformat(),
     )
@@ -241,16 +261,332 @@ def copy_reusable_ocr(source_job_id: str, target_root: Path, source_project_id: 
 
 
 def copy_reusable_openai_file(source_job_id: str, target_root: Path, source_project_id: str | None = None) -> None:
-    source_metadata = read_metadata(job_dir(source_job_id, source_project_id))
-    file_id = str(source_metadata.get("openai_file_id") or "")
-    if not file_id:
+    source_root = job_dir(source_job_id, source_project_id)
+    source_metadata = read_metadata(source_root)
+    file_ids = reusable_openai_file_ids(source_root, source_metadata)
+    if not file_ids and not isinstance(source_metadata.get("source_files"), list):
+        # Retain the old metadata-only fallback for pre-manifest jobs. Real
+        # bundles always take the complete-record path above.
+        legacy_file_id = str(source_metadata.get("openai_file_id") or "").strip()
+        file_ids = [legacy_file_id] if legacy_file_id else []
+    if not file_ids:
         return
     update_metadata(
         target_root,
-        openai_file_id=file_id,
+        openai_file_id=file_ids[0],
+        openai_file_ids=file_ids,
+        openai_source_bundle_sha256=str(source_metadata.get("openai_source_bundle_sha256") or source_metadata.get("source_bundle_sha256") or ""),
         openai_file_reused_from_job_id=source_job_id,
         openai_file_uploaded=False,
     )
+
+
+def save_source_bundle(
+    root: Path,
+    primary_upload: Any,
+    primary_relative_path: str,
+    attachments: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Persist one primary PDF and its optional supporting files for a single job.
+
+    The primary PDF intentionally remains at ``input/uploaded.pdf`` so all
+    pre-bundle job paths continue to work. Supporting sources are isolated
+    beneath ``input/attachments`` and described in metadata for reproducibility.
+    """
+
+    primary_name = source_display_filename(primary_upload, fallback="uploaded.pdf")
+    primary_path = root / "input" / "uploaded.pdf"
+    save_upload(source_upload_file(primary_upload), primary_path)
+    records: list[dict[str, Any]] = [
+        source_file_record(
+            role="primary_pdf",
+            filename=primary_name,
+            relative_path=primary_relative_path,
+            stored_path="input/uploaded.pdf",
+            path=primary_path,
+            source_index=0,
+        )
+    ]
+
+    attachment_root = root / "input" / "attachments"
+    for index, attachment in enumerate(attachments or [], start=1):
+        upload = attachment["upload"]
+        filename = source_display_filename(upload, fallback=f"attachment-{index}")
+        stored_name = f"{index:03d}-{safe_source_filename(filename, fallback=f'attachment-{index}')}"
+        destination = attachment_root / stored_name
+        save_upload(source_upload_file(upload), destination)
+        records.append(
+            source_file_record(
+                role="supporting_file",
+                filename=filename,
+                relative_path=str(attachment.get("relative_path") or filename),
+                stored_path=str(destination.relative_to(root)),
+                path=destination,
+                source_index=index,
+            )
+        )
+
+    bundle_sha256 = source_bundle_sha256(records)
+    primary = records[0]
+    supporting = records[1:]
+    return {
+        "uploaded_pdf": str(primary_path),
+        "pdf_sha256": str(primary["sha256"]),
+        "source_relative_path": str(primary["relative_path"]),
+        "source_files": records,
+        "source_bundle_sha256": bundle_sha256,
+        "supporting_file_count": len(supporting),
+        "supporting_filenames": [str(record["filename"]) for record in supporting],
+    }
+
+
+def source_file_records(root: Path, metadata: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Return safe, ordered source records for a job, including legacy jobs."""
+
+    payload = metadata if metadata is not None else read_metadata(root)
+    raw_records = payload.get("source_files") if isinstance(payload.get("source_files"), list) else []
+    records: list[dict[str, Any]] = []
+    for index, value in enumerate(raw_records):
+        if not isinstance(value, dict):
+            continue
+        stored_path = str(value.get("stored_path") or "").strip()
+        path = source_stored_path(root, stored_path)
+        if path is None or not path.exists() or not path.is_file():
+            continue
+        record = dict(value)
+        source_index = record.get("source_index")
+        record["source_index"] = int(source_index) if source_index not in {None, ""} else index
+        record["path"] = path
+        records.append(record)
+    if raw_records:
+        # A manifest is authoritative. Do not silently extract a partial study
+        # when a supporting source was removed or corrupted on disk.
+        if len(records) != len(raw_records) or not records:
+            return []
+        return sorted(
+            records,
+            key=lambda record: int(record.get("source_index") if record.get("source_index") is not None else 0),
+        )
+
+    # Existing jobs only know about the primary PDF. Keep them fully usable.
+    primary = root / "input" / "uploaded.pdf"
+    if not primary.exists() or not primary.is_file():
+        return []
+    record = source_file_record(
+        role="primary_pdf",
+        filename=str(payload.get("original_filename") or primary.name),
+        relative_path=str(payload.get("source_relative_path") or payload.get("original_filename") or primary.name),
+        stored_path="input/uploaded.pdf",
+        path=primary,
+        source_index=0,
+    )
+    record["path"] = primary
+    return [record]
+
+
+def source_file_paths(root: Path, metadata: dict[str, Any] | None = None) -> list[Path]:
+    return [Path(record["path"]) for record in source_file_records(root, metadata)]
+
+
+def reusable_openai_file_ids(root: Path, metadata: dict[str, Any] | None = None) -> list[str]:
+    """Return saved OpenAI IDs only when they cover this exact source bundle."""
+
+    payload = metadata if metadata is not None else read_metadata(root)
+    records = source_file_records(root, payload)
+    ids = [str(value or "") for value in payload.get("openai_file_ids") or []]
+    if not ids and payload.get("openai_file_id"):
+        ids = [str(payload["openai_file_id"])]
+    if len(ids) != len(records) or not all(ids):
+        return []
+    expected = str(payload.get("source_bundle_sha256") or "")
+    saved = str(payload.get("openai_source_bundle_sha256") or "")
+    if expected and saved and saved != expected:
+        return []
+    return ids
+
+
+def source_pdf_records(root: Path, metadata: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    return [record for record in source_file_records(root, metadata) if source_suffix(record) == ".pdf"]
+
+
+def source_spreadsheet_records(root: Path, metadata: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    return [record for record in source_file_records(root, metadata) if source_suffix(record) in {".xlsx", ".csv"}]
+
+
+def source_bundle_sha256(records: list[dict[str, Any]]) -> str:
+    canonical = [
+        {
+            "source_index": int(record.get("source_index")) if record.get("source_index") not in {None, ""} else index,
+            "role": str(record.get("role") or ""),
+            "filename": str(record.get("filename") or ""),
+            "relative_path": str(record.get("relative_path") or ""),
+            "sha256": str(record.get("sha256") or ""),
+        }
+        for index, record in enumerate(records)
+    ]
+    encoded = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def upload_source_bundle_sha256(
+    primary_upload: Any,
+    primary_relative_path: str,
+    attachments: list[dict[str, Any]] | None = None,
+) -> str:
+    records = [
+        {
+            "source_index": 0,
+            "role": "primary_pdf",
+            "filename": source_display_filename(primary_upload, fallback="uploaded.pdf"),
+            "relative_path": str(primary_relative_path or ""),
+            "sha256": stream_sha256(source_upload_file(primary_upload)),
+        }
+    ]
+    for index, attachment in enumerate(attachments or [], start=1):
+        upload = attachment["upload"]
+        records.append(
+            {
+                "source_index": index,
+                "role": "supporting_file",
+                "filename": source_display_filename(upload, fallback=f"attachment-{index}"),
+                "relative_path": str(attachment.get("relative_path") or ""),
+                "sha256": stream_sha256(source_upload_file(upload)),
+            }
+        )
+    return source_bundle_sha256(records)
+
+
+def copy_source_bundle(source_root: Path, target_root: Path) -> dict[str, Any]:
+    """Copy every stored source into a rerun child and return metadata updates."""
+
+    source_metadata = read_metadata(source_root)
+    return copy_source_bundle_records(source_root, source_metadata, target_root)
+
+
+def copy_source_bundle_records(
+    source_root: Path,
+    source_metadata: dict[str, Any],
+    target_root: Path,
+) -> dict[str, Any]:
+    """Copy a persisted source manifest into a job while preserving safe relative paths."""
+
+    records = source_file_records(source_root, source_metadata)
+    if not records:
+        raise FileNotFoundError(f"No source files found in {source_root}")
+    copied_records: list[dict[str, Any]] = []
+    for record in records:
+        source_path = Path(record["path"])
+        stored_path = str(record.get("stored_path") or "")
+        destination = source_stored_path(target_root, stored_path)
+        if destination is None:
+            raise ValueError(f"Invalid stored source path: {stored_path}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, destination)
+        copied = {key: value for key, value in record.items() if key != "path"}
+        copied_records.append(copied)
+    primary = next((record for record in copied_records if record.get("role") == "primary_pdf"), copied_records[0])
+    return {
+        "uploaded_pdf": str(target_root / "input" / "uploaded.pdf"),
+        "pdf_sha256": str(primary.get("sha256") or file_sha256(target_root / "input" / "uploaded.pdf")),
+        "source_relative_path": str(primary.get("relative_path") or source_metadata.get("source_relative_path") or ""),
+        "source_folder": str(source_metadata.get("source_folder") or ""),
+        "source_files": copied_records,
+        "source_bundle_sha256": str(source_metadata.get("source_bundle_sha256") or source_bundle_sha256(copied_records)),
+        "supporting_file_count": max(0, len(copied_records) - 1),
+        "supporting_filenames": [str(record.get("filename") or "") for record in copied_records[1:]],
+    }
+
+
+def record_openai_source_file(root: Path, *, file_id: str, source_index: int = 0, uploaded: bool) -> dict[str, Any]:
+    """Persist OpenAI file IDs by bundle position so retries can reuse all sources."""
+
+    if not file_id:
+        return read_metadata(root)
+    path = root / "metadata.json"
+    with _path_lock(path):
+        metadata = read_metadata(root)
+        file_ids = [str(value or "") for value in metadata.get("openai_file_ids") or []]
+        index = max(0, int(source_index or 0))
+        while len(file_ids) <= index:
+            file_ids.append("")
+        file_ids[index] = file_id
+        metadata.update(
+            {
+                "openai_file_ids": file_ids,
+                "openai_file_id": file_ids[0] if file_ids else file_id,
+                "openai_source_bundle_sha256": str(metadata.get("source_bundle_sha256") or ""),
+                "openai_file_uploaded": bool(metadata.get("openai_file_uploaded")) or bool(uploaded),
+            }
+        )
+        write_json(path, metadata)
+        return metadata
+
+
+def source_upload_file(upload: Any) -> Any:
+    return getattr(upload, "file", upload)
+
+
+def source_display_filename(upload: Any, *, fallback: str) -> str:
+    return safe_source_filename(str(getattr(upload, "filename", "") or ""), fallback=fallback)
+
+
+def safe_source_filename(filename: str, *, fallback: str) -> str:
+    return Path(str(filename or fallback)).name or fallback
+
+
+def source_file_record(
+    *,
+    role: str,
+    filename: str,
+    relative_path: str,
+    stored_path: str,
+    path: Path,
+    source_index: int,
+) -> dict[str, Any]:
+    return {
+        "source_index": source_index,
+        "role": role,
+        "filename": filename,
+        "relative_path": str(relative_path or filename),
+        "stored_path": stored_path.replace("\\", "/"),
+        "sha256": file_sha256(path),
+        "size_bytes": path.stat().st_size,
+        "content_type": source_suffix_from_name(filename).lstrip("."),
+    }
+
+
+def source_stored_path(root: Path, stored_path: str) -> Path | None:
+    candidate = (root / str(stored_path or "")).resolve()
+    try:
+        candidate.relative_to(root.resolve())
+    except ValueError:
+        return None
+    return candidate
+
+
+def source_suffix(record: dict[str, Any]) -> str:
+    return source_suffix_from_name(str(record.get("filename") or record.get("stored_path") or ""))
+
+
+def source_suffix_from_name(name: str) -> str:
+    return Path(str(name or "")).suffix.lower()
+
+
+def stream_sha256(stream: Any) -> str:
+    position = stream.tell() if hasattr(stream, "tell") else None
+    try:
+        if hasattr(stream, "seek"):
+            stream.seek(0)
+        digest = hashlib.sha256()
+        while True:
+            chunk = stream.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        return digest.hexdigest()
+    finally:
+        if position is not None and hasattr(stream, "seek"):
+            stream.seek(position)
 
 
 def read_status(job_id: str, project_id: str | None = None) -> dict[str, Any]:

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 from app import config
 from app.models import JobSettings
-from app.services import jobs
+from app.services import jobs, supplementary_sources
 from app.services.deepseek_ocr import discover_deepseek_model, run_deepseek_ocr
 from app.services.ocr_merge import merge_page_texts
 from app.services.openai_inference_queue import OpenAIInferenceJob, openai_inference_queue
@@ -38,7 +39,7 @@ def run_job(
         jobs.update_status(
             job_id,
             stage="upload",
-            message="Uploading PDF",
+            message="Preparing study bundle",
             progress=0.02,
             event={"event": "stage", "stage": "upload"},
             project_id=project_id,
@@ -48,6 +49,12 @@ def run_job(
         process_control.raise_if_cancelled(job_id)
 
         metadata = jobs.read_metadata(root)
+        source_records = jobs.source_file_records(root, metadata)
+        if not source_records:
+            raise RuntimeError("No source files were saved for this job.")
+        source_pdf_records = jobs.source_pdf_records(root, metadata)
+        supplementary_pdf_records = [record for record in source_pdf_records if record.get("role") != "primary_pdf"]
+        spreadsheet_records = jobs.source_spreadsheet_records(root, metadata)
         merged_file = root / "outputs" / "merged_full_text.txt"
         use_openai_pdf_file = settings.rq_provider == "openai" and settings.openai_input_mode == "pdf_file"
         reuse_screening_only = bool(
@@ -63,9 +70,15 @@ def run_job(
                 project_id=project_id,
             )
             try:
-                total_pages = page_count(pdf_path)
-                if total_pages > 0:
-                    jobs.update_metadata(root, number_of_pages=total_pages)
+                primary_pages = page_count(pdf_path)
+                supporting_pages = sum(page_count(Path(record["path"])) for record in supplementary_pdf_records)
+                if primary_pages > 0:
+                    jobs.update_metadata(
+                        root,
+                        number_of_pages=primary_pages,
+                        source_pdf_page_count=primary_pages + supporting_pages,
+                        supporting_pdf_count=len(supplementary_pdf_records),
+                    )
             except Exception as exc:
                 jobs.append_warning(root, f"Could not count PDF pages before OpenAI upload: {exc}")
             merged_text = ""
@@ -93,18 +106,61 @@ def run_job(
                 event={"event": "stage", "stage": "render"},
                 project_id=project_id,
             )
-            total_pages = page_count(pdf_path)
-            if total_pages <= 0:
+            primary_pages = page_count(pdf_path)
+            if primary_pages <= 0:
                 raise RuntimeError("No pages found in the uploaded PDF.")
-            ocr_images = render_pdf_to_images(
+            primary_images = render_pdf_to_images(
                 pdf_path,
                 root / "rendered_pages",
                 root / "ocr_images",
                 dpi=settings.ocr_dpi,
             )
-            if not ocr_images:
+            if not primary_images:
                 raise RuntimeError("PDF rendering produced no OCR images.")
-            jobs.update_metadata(root, number_of_pages=total_pages, rendered_images=[str(path) for path in ocr_images])
+            ocr_images = list(primary_images)
+            ocr_names = [
+                f"page_{page_index:06d}__primary_{page_index:04d}"
+                for page_index, _path in enumerate(primary_images, start=1)
+            ]
+            total_pages = primary_pages
+            for source_index, record in enumerate(supplementary_pdf_records, start=1):
+                attachment_path = Path(record["path"])
+                attachment_name = str(record.get("filename") or attachment_path.name)
+                try:
+                    attachment_pages = page_count(attachment_path)
+                except Exception as exc:
+                    jobs.append_warning(root, f"Could not inspect supporting PDF {attachment_name}: {exc}")
+                    continue
+                if attachment_pages <= 0:
+                    jobs.append_warning(root, f"Supporting PDF has no pages: {attachment_name}")
+                    continue
+                try:
+                    attachment_images = render_pdf_to_images(
+                        attachment_path,
+                        root / "rendered_pages" / "attachments" / f"{source_index:03d}",
+                        root / "ocr_images" / "attachments" / f"{source_index:03d}",
+                        dpi=settings.ocr_dpi,
+                    )
+                except Exception as exc:
+                    jobs.append_warning(root, f"Could not render supporting PDF {attachment_name}: {exc}")
+                    continue
+                if not attachment_images:
+                    jobs.append_warning(root, f"Could not render supporting PDF: {attachment_name}")
+                    continue
+                total_pages += attachment_pages
+                ocr_images.extend(attachment_images)
+                sequence_start = len(ocr_names)
+                ocr_names.extend(
+                    f"page_{sequence_start + page_index:06d}__supporting_{source_index:03d}_{page_index:04d}"
+                    for page_index, _path in enumerate(attachment_images, start=1)
+                )
+            jobs.update_metadata(
+                root,
+                number_of_pages=primary_pages,
+                source_pdf_page_count=total_pages,
+                supporting_pdf_count=len(supplementary_pdf_records),
+                rendered_images=[str(path) for path in ocr_images],
+            )
             process_control.raise_if_cancelled(job_id)
 
             jobs.update_status(
@@ -159,7 +215,7 @@ def run_job(
                 temperature=config.DEFAULT_DEEPSEEK_OCR_TEMPERATURE,
                 batch_size=settings.ocr_batch_size,
                 prompt=config.DEFAULT_DEEPSEEK_OCR_PROMPT,
-                names=[path.stem for path in ocr_images],
+                names=ocr_names,
                 on_event=handle_ocr_event,
             )
             process_control.raise_if_cancelled(job_id)
@@ -175,7 +231,22 @@ def run_job(
             merged_text = merge_page_texts(root / "ocr_text", merged_file)
             if not merged_text.strip() or len(merged_text.strip()) < 20:
                 raise RuntimeError("No OCR text extracted. Inspect the page files in the job folder.")
-            jobs.update_metadata(root, ocr_complete=True)
+            spreadsheet_transcripts = supplementary_sources.transcript_spreadsheet_sources(
+                spreadsheet_records,
+                root / "outputs" / "supplementary_text",
+            )
+            transcript_text = "\n\n".join(item.text.strip() for item in spreadsheet_transcripts if item.text.strip())
+            warnings = [item.warning for item in spreadsheet_transcripts if item.warning]
+            for warning in warnings:
+                jobs.append_warning(root, warning)
+            if transcript_text:
+                merged_text = merged_text.rstrip() + "\n\n" + transcript_text + "\n"
+                merged_file.write_text(merged_text, encoding="utf-8")
+            jobs.update_metadata(
+                root,
+                ocr_complete=True,
+                supplementary_transcript_files=[str(item.output_path) for item in spreadsheet_transcripts if item.output_path],
+            )
             process_control.raise_if_cancelled(job_id)
 
         jobs.update_status(
@@ -196,8 +267,9 @@ def run_job(
             prompt_filename = prompt_record["filename"]
             prompt_source_path = prompt_record["path"]
         user_prompt = (
-            "Use the attached PDF file to assess the full text. Consider text, tables, figures, charts, "
-            "captions, and appendices when applying the system prompt."
+            "Use the attached primary PDF and every supporting source file to assess the full study. "
+            "Consider text, tables, figures, charts, captions, appendices, and supplementary data when applying "
+            "the system prompt."
             if use_openai_pdf_file
             else merged_text
         )
@@ -217,6 +289,9 @@ def run_job(
         process_control.raise_if_cancelled(job_id)
 
         output_file = root / "outputs" / "rq_screening_output.md"
+        openai_source_paths = jobs.source_file_paths(root, jobs.read_metadata(root)) if use_openai_pdf_file else []
+        reusable_openai_file_ids = jobs.reusable_openai_file_ids(root, jobs.read_metadata(root)) if use_openai_pdf_file else []
+        uses_bundle_openai_inputs = use_openai_pdf_file and len(openai_source_paths) > 1
 
         if settings.rq_provider == "openai":
             if defer_openai:
@@ -236,8 +311,9 @@ def run_job(
                         user_prompt_file=user_prompt_file,
                         output_file=output_file,
                         pdf_path=pdf_path,
+                        source_file_paths=tuple(openai_source_paths),
                         openai_input_mode=settings.openai_input_mode,
-                        openai_file_id=str(jobs.read_metadata(root).get("openai_file_id") or ""),
+                        openai_file_ids=tuple(reusable_openai_file_ids),
                     )
                 )
                 if not enqueued:
@@ -253,10 +329,10 @@ def run_job(
                 enable_reasoning=settings.rq_enable_thinking,
                 reasoning_effort=settings.openai_reasoning_effort,
                 api_key=settings.openai_api_key,
-                input_file_id=str(jobs.read_metadata(root).get("openai_file_id") or "")
-                if use_openai_pdf_file
-                else "",
-                input_file_path=pdf_path if use_openai_pdf_file else None,
+                input_file_id=(reusable_openai_file_ids[0] if reusable_openai_file_ids and not uses_bundle_openai_inputs else ""),
+                input_file_path=(openai_source_paths[0] if use_openai_pdf_file and not reusable_openai_file_ids and not uses_bundle_openai_inputs else None),
+                input_file_ids=reusable_openai_file_ids if uses_bundle_openai_inputs else [],
+                input_file_paths=openai_source_paths if uses_bundle_openai_inputs and not reusable_openai_file_ids else [],
                 on_event=lambda event: handle_llm_event(job_id, event, provider="openai", project_id=project_id),
             )
         else:
@@ -344,17 +420,18 @@ def handle_llm_event(
         message = "Running RQ screening" if provider == "local" else "OpenAI inference running"
         progress = 0.84
     elif name == "openai_file_upload_started":
-        message = "Uploading PDF to OpenAI"
+        message = "Uploading source file to OpenAI"
         progress = 0.76
     elif name in {"openai_file_uploaded", "openai_file_reused"}:
         file_id = str(event.get("file_id") or "")
         if file_id:
-            jobs.update_metadata(
+            jobs.record_openai_source_file(
                 jobs.job_dir(job_id, project_id),
-                openai_file_id=file_id,
-                openai_file_uploaded=name == "openai_file_uploaded",
+                file_id=file_id,
+                source_index=int(event.get("source_index") or 0),
+                uploaded=name == "openai_file_uploaded",
             )
-        message = "OpenAI PDF file ready"
+        message = "OpenAI source file ready"
         progress = 0.80
     elif name == "rq_generation_finished":
         message = "RQ screening complete" if provider == "local" else "OpenAI inference complete"

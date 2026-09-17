@@ -1,11 +1,19 @@
 const structuredForm = document.querySelector("#structuredJobForm");
+const structuredSourceImportForm = document.querySelector("#structuredSourceImportForm");
 const runStructuredButton = document.querySelector("#runStructuredButton");
+const importStructuredSourcesButton = document.querySelector("#importStructuredSourcesButton");
 const pdfInput = document.querySelector("#pdfInput");
+const supportingInput = document.querySelector("#supportingInput");
 const folderInput = document.querySelector("#folderInput");
 const chooseFilesButton = document.querySelector("#chooseFilesButton");
+const chooseSupportingFilesButton = document.querySelector("#chooseSupportingFilesButton");
 const chooseFolderButton = document.querySelector("#chooseFolderButton");
 const pdfInputSummary = document.querySelector("#pdfInputSummary");
+const supportingInputSummary = document.querySelector("#supportingInputSummary");
 const folderInputSummary = document.querySelector("#folderInputSummary");
+const studyBundleReview = document.querySelector("#studyBundleReview");
+const studyBundleSummary = document.querySelector("#studyBundleSummary");
+const studyBundleList = document.querySelector("#studyBundleList");
 const sheetTabs = document.querySelector("#sheetTabs");
 const sheetTabsScrollLeft = document.querySelector("#sheetTabsScrollLeft");
 const sheetTabsScrollRight = document.querySelector("#sheetTabsScrollRight");
@@ -23,13 +31,16 @@ const columnEditorList = document.querySelector("#columnEditorList");
 const addColumnButton = document.querySelector("#addColumnButton");
 const pasteColumnsButton = document.querySelector("#pasteColumnsButton");
 const exportSheetTextButton = document.querySelector("#exportSheetTextButton");
+const exportAllSheetTextsButton = document.querySelector("#exportAllSheetTextsButton");
 const sheetFormStatus = document.querySelector("#sheetFormStatus");
 const toggleStructuredSchemaButton = document.querySelector("#toggleStructuredSchemaButton");
 const structuredSchemaFields = document.querySelector("#structuredSchemaFields");
 const structuredColumnInstructions = document.querySelector("#structuredColumnInstructions");
 const compiledPromptPreview = document.querySelector("#compiledPromptPreview");
 const structuredExportLink = document.querySelector("#structuredExportLink");
+const structuredWorksheetExportButton = document.querySelector("#structuredWorksheetExportButton");
 const structuredStatusLine = document.querySelector("#structuredStatusLine");
+const sourceImportStatusLine = document.querySelector("#sourceImportStatusLine");
 const structuredQueueBadge = document.querySelector("#structuredQueueBadge");
 const structuredRowsSummary = document.querySelector("#structuredRowsSummary");
 const structuredSearchInput = document.querySelector("#structuredSearchInput");
@@ -48,6 +59,22 @@ const structuredJobsSummary = document.querySelector("#structuredJobsSummary");
 const refreshStructuredButton = document.querySelector("#refreshStructuredButton");
 const toggleStructuredSetupButton = document.querySelector("#toggleStructuredSetupButton");
 const structuredSetupBody = document.querySelector("#structuredSetupBody");
+const structuredLibraryTab = document.querySelector("#structuredLibraryTab");
+const structuredWorkbooksTab = document.querySelector("#structuredWorkbooksTab");
+const structuredLibraryView = document.querySelector("#structuredLibraryView");
+const structuredWorkbookView = document.querySelector("#structuredWorkbookView");
+const structuredWorkbookSelect = document.querySelector("#structuredWorkbookSelect");
+const newStructuredWorkbookButton = document.querySelector("#newStructuredWorkbookButton");
+const duplicateActiveWorkbookButton = document.querySelector("#duplicateActiveWorkbookButton");
+const refreshStructuredSourcesButton = document.querySelector("#refreshStructuredSourcesButton");
+const structuredSourcesSummary = document.querySelector("#structuredSourcesSummary");
+const structuredSourcesList = document.querySelector("#structuredSourcesList");
+const structuredSourceSelectionSummary = document.querySelector("#structuredSourceSelectionSummary");
+const structuredSourcePickerList = document.querySelector("#structuredSourcePickerList");
+const selectAllStructuredSourcesButton = document.querySelector("#selectAllStructuredSourcesButton");
+const clearStructuredSourcesButton = document.querySelector("#clearStructuredSourcesButton");
+const toggleStructuredResultsButton = document.querySelector("#toggleStructuredResultsButton");
+const structuredResultsContent = document.querySelector("#structuredResultsContent");
 const modelPresetSelect = document.querySelector("#modelPresetSelect");
 const openaiApiKeyField = document.querySelector("#openaiApiKeyField");
 const openaiInputModeField = document.querySelector("#openaiInputModeField");
@@ -99,6 +126,10 @@ const STRUCTURED_JOB_OVERSCAN = 8;
 
 let sheets = [];
 let activeSheet = null;
+let workbooks = [];
+let activeWorkbook = null;
+let structuredSources = [];
+let selectedSourceIds = new Set();
 let jobs = [];
 let structuredJobWindow = { offset: -1, limit: STRUCTURED_JOB_WINDOW_LIMIT, total: 0, items: [], sheetId: "" };
 let structuredJobCounts = { all: 0, running: 0, queued: 0, completed: 0, failed: 0, parse_error: 0 };
@@ -110,30 +141,50 @@ let searchDebounceTimer = null;
 let autosaveTimer = null;
 let hasUnsavedSheetChanges = false;
 let isSavingSheet = false;
+let isExportingAllSheetTexts = false;
+let isExportingWorksheet = false;
 let isRenderingSheet = false;
+let studyBundlePicker = null;
 
 document.addEventListener("DOMContentLoaded", async () => {
+  studyBundlePicker = window.CEREBROStudyBundles?.mountStudyBundlePicker({
+    primaryInput: pdfInput,
+    supportingInput,
+    folderInput,
+    primarySummary: pdfInputSummary,
+    supportingSummary: supportingInputSummary,
+    folderSummary: folderInputSummary,
+    review: studyBundleReview,
+    reviewSummary: studyBundleSummary,
+    reviewList: studyBundleList,
+  });
   initializeProjectSidebar();
-  updateProjectLinks();
   renderSelectedModelPreset();
   renderProjectChoices(initialProjects);
   await loadProjectList();
+  await loadWorkbooks();
+  await loadStructuredSources();
   await loadSheets();
   await refreshJobs();
   await loadRows(0, { force: true });
+  setStructuredWorkspaceView(initialStructuredWorkspaceView(), { updateLocation: false });
   startPolling();
 });
 
 chooseFilesButton.addEventListener("click", () => pdfInput.click());
+chooseSupportingFilesButton?.addEventListener("click", () => supportingInput?.click());
 chooseFolderButton.addEventListener("click", () => folderInput.click());
-pdfInput.addEventListener("change", updateUploadSummaries);
-folderInput.addEventListener("change", updateUploadSummaries);
 modelPresetSelect.addEventListener("change", renderSelectedModelPreset);
+structuredLibraryTab?.addEventListener("click", () => setStructuredWorkspaceView("library"));
+structuredWorkbooksTab?.addEventListener("click", () => setStructuredWorkspaceView("workbooks"));
 toggleStructuredSetupButton?.addEventListener("click", () => {
   setStructuredSetupCollapsed(!structuredSetupBody.classList.contains("hidden"));
 });
 toggleStructuredSchemaButton?.addEventListener("click", () => {
   setStructuredSchemaCollapsed(!structuredSchemaFields.classList.contains("hidden"));
+});
+toggleStructuredResultsButton?.addEventListener("click", () => {
+  setStructuredResultsCollapsed(!structuredResultsContent.classList.contains("hidden"));
 });
 
 addSheetButton.addEventListener("click", async () => {
@@ -150,10 +201,45 @@ saveSheetButton.addEventListener("click", async () => {
 
 duplicateSheetButton?.addEventListener("click", duplicateActiveSheet);
 duplicateWorkbookButton?.addEventListener("click", openDuplicateWorkbookDialog);
+newStructuredWorkbookButton?.addEventListener("click", createStructuredWorkbook);
+duplicateActiveWorkbookButton?.addEventListener("click", duplicateActiveWorkbook);
+structuredWorkbookSelect?.addEventListener("change", async () => {
+  await selectStructuredWorkbook(structuredWorkbookSelect.value);
+});
+refreshStructuredSourcesButton?.addEventListener("click", async () => {
+  await loadStructuredSources();
+});
+selectAllStructuredSourcesButton?.addEventListener("click", () => {
+  selectedSourceIds = new Set(structuredSources.map((source) => String(source.source_id || "")).filter(Boolean));
+  persistSelectedSourceIds();
+  renderStructuredSourcePicker();
+});
+clearStructuredSourcesButton?.addEventListener("click", () => {
+  selectedSourceIds.clear();
+  persistSelectedSourceIds();
+  renderStructuredSourcePicker();
+});
+structuredSourcePickerList?.addEventListener("change", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement) || target.type !== "checkbox") return;
+  const sourceId = String(target.dataset.sourceId || "");
+  if (!sourceId) return;
+  if (target.checked) selectedSourceIds.add(sourceId);
+  else selectedSourceIds.delete(sourceId);
+  persistSelectedSourceIds();
+  renderStructuredSourcePicker();
+});
+structuredSourcesList?.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-delete-structured-source]");
+  if (!button) return;
+  await deleteStructuredSource(button.dataset.deleteStructuredSource || "");
+});
 deleteSheetButton.addEventListener("click", deleteActiveSheet);
 addColumnButton.addEventListener("click", () => addSchemaColumn());
 addColumnDivider?.addEventListener("click", () => addSchemaColumn({ focusNewColumn: true }));
 exportSheetTextButton?.addEventListener("click", exportActiveSheetText);
+exportAllSheetTextsButton?.addEventListener("click", exportAllSheetTexts);
+structuredWorksheetExportButton?.addEventListener("click", exportActiveWorksheet);
 pasteColumnsButton.addEventListener("click", () => openModal(pasteColumnsModal));
 closePasteColumnsButton.addEventListener("click", () => closeModal(pasteColumnsModal));
 parseColumnsButton.addEventListener("click", parsePastedColumns);
@@ -252,6 +338,11 @@ refreshStructuredButton.addEventListener("click", async () => {
 structuredForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   await submitStructuredJobs();
+});
+
+structuredSourceImportForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await importStructuredSources();
 });
 
 structuredTableViewport.addEventListener("scroll", () => {
@@ -369,7 +460,7 @@ function renderProjectChoices(projects) {
 }
 
 function updateProjectLinks() {
-  if (structuredExportLink) structuredExportLink.href = withProject("/api/structured/export");
+  if (structuredExportLink) structuredExportLink.href = withWorkbook("/api/structured/export");
 }
 
 function withProject(url) {
@@ -377,10 +468,331 @@ function withProject(url) {
   return `${url}${separator}project_id=${encodeURIComponent(currentProjectId)}`;
 }
 
+function withWorkbook(url) {
+  const projectUrl = withProject(url);
+  const workbookId = String(activeWorkbook?.workbook_id || "");
+  return workbookId ? `${projectUrl}&workbook_id=${encodeURIComponent(workbookId)}` : projectUrl;
+}
+
 function buildProjectFormData() {
   const body = new FormData();
   body.append("project_id", currentProjectId);
   return body;
+}
+
+function buildWorkbookFormData() {
+  const body = buildProjectFormData();
+  if (activeWorkbook?.workbook_id) body.append("workbook_id", activeWorkbook.workbook_id);
+  return body;
+}
+
+function initialStructuredWorkspaceView() {
+  const view = new URLSearchParams(window.location.search).get("view");
+  return view === "workbooks" ? "workbooks" : "library";
+}
+
+function setStructuredWorkspaceView(view, options = {}) {
+  const selectedView = view === "workbooks" ? "workbooks" : "library";
+  structuredLibraryView?.classList.toggle("hidden", selectedView !== "library");
+  structuredWorkbookView?.classList.toggle("hidden", selectedView !== "workbooks");
+  structuredLibraryTab?.classList.toggle("active", selectedView === "library");
+  structuredWorkbooksTab?.classList.toggle("active", selectedView === "workbooks");
+  structuredLibraryTab?.setAttribute("aria-selected", selectedView === "library" ? "true" : "false");
+  structuredWorkbooksTab?.setAttribute("aria-selected", selectedView === "workbooks" ? "true" : "false");
+  if (options.updateLocation === false) return;
+  const url = new URL(window.location.href);
+  url.searchParams.set("view", selectedView);
+  window.history.replaceState({}, "", url);
+}
+
+function syncWorkbookLocation() {
+  const url = new URL(window.location.href);
+  if (activeWorkbook?.workbook_id) url.searchParams.set("workbook_id", activeWorkbook.workbook_id);
+  else url.searchParams.delete("workbook_id");
+  window.history.replaceState({}, "", url);
+}
+
+async function loadWorkbooks() {
+  const response = await fetch(withProject("/api/structured/workbooks"));
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    setStatus(payload.detail || "Could not load structured workbooks.", "failed");
+    return false;
+  }
+  workbooks = payload.workbooks || [];
+  const requestedWorkbookId = new URLSearchParams(window.location.search).get("workbook_id") || "";
+  const previousWorkbookId = activeWorkbook?.workbook_id || requestedWorkbookId;
+  activeWorkbook = workbooks.find((workbook) => workbook.workbook_id === previousWorkbookId) || workbooks[0] || null;
+  renderWorkbookSelector();
+  syncWorkbookLocation();
+  updateProjectLinks();
+  return Boolean(activeWorkbook);
+}
+
+function renderWorkbookSelector() {
+  if (!structuredWorkbookSelect) return;
+  structuredWorkbookSelect.innerHTML = (workbooks || [])
+    .map((workbook) => {
+      const selected = workbook.workbook_id === activeWorkbook?.workbook_id ? " selected" : "";
+      return `<option value="${escapeAttribute(workbook.workbook_id || "")}"${selected}>${escapeHtml(workbook.name || "Workbook")}</option>`;
+    })
+    .join("");
+  structuredWorkbookSelect.disabled = !workbooks.length;
+  duplicateActiveWorkbookButton?.toggleAttribute("disabled", !activeWorkbook);
+}
+
+async function selectStructuredWorkbook(workbookId) {
+  const nextWorkbook = workbooks.find((workbook) => workbook.workbook_id === workbookId);
+  if (!nextWorkbook || nextWorkbook.workbook_id === activeWorkbook?.workbook_id) return;
+  if (hasUnsavedSheetChanges && !isActiveSheetLocked()) {
+    const saved = await saveActiveSheet({ silent: true, requireReady: false });
+    if (!saved) {
+      renderWorkbookSelector();
+      return;
+    }
+  }
+  activeWorkbook = nextWorkbook;
+  activeSheet = null;
+  sheets = [];
+  jobs = [];
+  rowWindow = { offset: -1, limit: 0, items: [], total: 0, search: "", sheetId: "" };
+  structuredJobWindow = { offset: -1, limit: STRUCTURED_JOB_WINDOW_LIMIT, total: 0, items: [], sheetId: "" };
+  structuredJobRequestKey = "";
+  restoreSelectedSourceIds();
+  renderWorkbookSelector();
+  syncWorkbookLocation();
+  updateProjectLinks();
+  await loadSheets();
+  await refreshJobs(0, { force: true });
+  structuredTableViewport.scrollTop = 0;
+  await loadRows(0, { force: true });
+  renderStructuredSourcePicker();
+}
+
+async function createStructuredWorkbook() {
+  const body = buildProjectFormData();
+  const response = await fetch("/api/structured/workbooks", { method: "POST", body });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    setStatus(payload.detail || "Could not create workbook.", "failed");
+    return;
+  }
+  workbooks = payload.workbooks || [];
+  activeWorkbook = payload.workbook || workbooks[workbooks.length - 1] || null;
+  restoreSelectedSourceIds();
+  renderWorkbookSelector();
+  syncWorkbookLocation();
+  updateProjectLinks();
+  activeSheet = null;
+  sheets = [];
+  await loadSheets();
+  await refreshJobs(0, { force: true });
+  await loadRows(0, { force: true });
+  renderStructuredSourcePicker();
+  setSheetStatus(`Created ${activeWorkbook?.name || "workbook"}.`, "complete");
+}
+
+async function duplicateActiveWorkbook() {
+  if (!activeWorkbook?.workbook_id) return;
+  if (hasUnsavedSheetChanges && !isActiveSheetLocked()) {
+    const saved = await saveActiveSheet({ silent: true, requireReady: false });
+    if (!saved) return;
+  }
+  const body = buildProjectFormData();
+  const response = await fetch(`/api/structured/workbooks/${encodeURIComponent(activeWorkbook.workbook_id)}/duplicate`, {
+    method: "POST",
+    body,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    setStatus(payload.detail || "Could not duplicate workbook.", "failed");
+    return;
+  }
+  workbooks = payload.workbooks || [];
+  activeWorkbook = payload.workbook || workbooks[workbooks.length - 1] || null;
+  activeSheet = null;
+  sheets = [];
+  restoreSelectedSourceIds();
+  renderWorkbookSelector();
+  syncWorkbookLocation();
+  updateProjectLinks();
+  await loadSheets();
+  await refreshJobs(0, { force: true });
+  await loadRows(0, { force: true });
+  renderStructuredSourcePicker();
+  setSheetStatus(`Duplicated ${activeWorkbook?.name || "workbook"} without jobs or extracted rows.`, "complete");
+}
+
+function selectedSourceStorageKey() {
+  return `cerebro:structured-source-selection:${currentProjectId}:${activeWorkbook?.workbook_id || ""}`;
+}
+
+function restoreSelectedSourceIds() {
+  try {
+    const raw = window.localStorage.getItem(selectedSourceStorageKey());
+    const values = JSON.parse(raw || "[]");
+    selectedSourceIds = new Set(Array.isArray(values) ? values.map((value) => String(value || "")).filter(Boolean) : []);
+  } catch (_error) {
+    selectedSourceIds = new Set();
+  }
+}
+
+function persistSelectedSourceIds() {
+  try {
+    window.localStorage.setItem(selectedSourceStorageKey(), JSON.stringify(Array.from(selectedSourceIds)));
+  } catch (_error) {
+    // Source selection is a convenience only; the current page state remains usable.
+  }
+}
+
+async function loadStructuredSources() {
+  const response = await fetch(withProject("/api/structured/sources"));
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    setSourceImportStatus(payload.detail || "Could not load the project PDF library.", "failed");
+    return;
+  }
+  structuredSources = payload.sources || [];
+  restoreSelectedSourceIds();
+  const available = new Set(structuredSources.map((source) => String(source.source_id || "")));
+  selectedSourceIds = new Set(Array.from(selectedSourceIds).filter((sourceId) => available.has(sourceId)));
+  persistSelectedSourceIds();
+  renderStructuredSourceLibrary();
+  renderStructuredSourcePicker();
+}
+
+function renderStructuredSourceLibrary() {
+  if (structuredSourcesSummary) {
+    const count = structuredSources.length;
+    structuredSourcesSummary.textContent = count
+      ? `${count.toLocaleString()} reusable study ${count === 1 ? "source" : "sources"} in this project.`
+      : "No study bundles have been imported.";
+  }
+  if (!structuredSourcesList) return;
+  if (!structuredSources.length) {
+    structuredSourcesList.innerHTML = `<p class="technical-empty">Import primary PDFs and supporting files above. They remain available to every workbook in this project.</p>`;
+    return;
+  }
+  structuredSourcesList.innerHTML = structuredSources
+    .map((source) => {
+      const supportCount = Number(source.supporting_file_count || 0);
+      const supportLabel = supportCount ? `${supportCount} supporting ${supportCount === 1 ? "file" : "files"}` : "Primary PDF only";
+      const usage = Number(source.used_by_jobs || 0);
+      const files = (source.supporting_files || [])
+        .map((file) => escapeHtml(file.filename || file.relative_path || "Supporting file"))
+        .join(", ");
+      return `
+        <article class="structured-source-library-item">
+          <div>
+            <strong title="${escapeAttribute(source.source_relative_path || source.primary_filename || "")}">${escapeHtml(source.primary_filename || "PDF source")}</strong>
+            <small>${escapeHtml(supportLabel)}${files ? `: ${files}` : ""}</small>
+            <small>Imported ${escapeHtml(formatTimestamp(source.created_at || ""))}${usage ? `; used by ${usage} job${usage === 1 ? "" : "s"}` : ""}</small>
+          </div>
+          <button class="secondary-button" type="button" data-delete-structured-source="${escapeAttribute(source.source_id || "")}">Remove</button>
+        </article>
+      `;
+    })
+    .join("");
+}
+
+function renderStructuredSourcePicker() {
+  const selectedCount = selectedSourceIds.size;
+  if (structuredSourceSelectionSummary) {
+    structuredSourceSelectionSummary.textContent = structuredSources.length
+      ? `${selectedCount.toLocaleString()} of ${structuredSources.length.toLocaleString()} imported study ${structuredSources.length === 1 ? "source" : "sources"} selected.`
+      : "No imported sources yet. Add PDFs in the PDF library tab first.";
+  }
+  selectAllStructuredSourcesButton?.toggleAttribute("disabled", !structuredSources.length);
+  clearStructuredSourcesButton?.toggleAttribute("disabled", !selectedCount);
+  if (!structuredSourcePickerList) return;
+  if (!structuredSources.length) {
+    structuredSourcePickerList.innerHTML = `<p class="technical-empty">No PDF sources are available in this project.</p>`;
+    return;
+  }
+  structuredSourcePickerList.innerHTML = structuredSources
+    .map((source) => {
+      const sourceId = String(source.source_id || "");
+      const checked = selectedSourceIds.has(sourceId) ? " checked" : "";
+      const supportCount = Number(source.supporting_file_count || 0);
+      return `
+        <label class="structured-source-picker-item">
+          <input type="checkbox" data-source-id="${escapeAttribute(sourceId)}"${checked} />
+          <span>
+            <strong>${escapeHtml(source.primary_filename || "PDF source")}</strong>
+            <small>${supportCount ? `${supportCount} attachment${supportCount === 1 ? "" : "s"}` : "Primary PDF only"}</small>
+          </span>
+        </label>
+      `;
+    })
+    .join("");
+}
+
+async function importStructuredSources() {
+  const selection = studyBundlePicker?.getBundles();
+  if (!selection || selection.error) {
+    setSourceImportStatus(selection?.error || "Choose at least one primary PDF to import.", "failed");
+    return;
+  }
+  const bundles = selection.bundles || [];
+  if (!bundles.length) {
+    setSourceImportStatus("Choose at least one primary PDF to import.", "failed");
+    return;
+  }
+  importStructuredSourcesButton?.toggleAttribute("disabled", true);
+  setSourceImportStatus(`Importing ${bundles.length} study ${bundles.length === 1 ? "source" : "sources"}...`, "queued");
+  try {
+    const body = buildProjectFormData();
+    studyBundlePicker.appendBundlesToFormData(body, bundles);
+    const response = await fetch("/api/structured/sources", { method: "POST", body });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.detail || "Could not import PDF sources.");
+    clearFileInputs();
+    structuredSources = payload.sources || [];
+    renderStructuredSourceLibrary();
+    renderStructuredSourcePicker();
+    const imported = Number(payload.created?.length || 0);
+    const existing = Number(payload.existing?.length || 0);
+    const details = [
+      imported ? `Imported ${imported} new study ${imported === 1 ? "source" : "sources"}.` : "",
+      existing ? `${existing} already existed and was retained.` : "",
+    ].filter(Boolean).join(" ");
+    setSourceImportStatus(details || "The project PDF library is up to date.", "complete");
+  } catch (error) {
+    setSourceImportStatus(error.message || "Could not import PDF sources.", "failed");
+  } finally {
+    importStructuredSourcesButton?.toggleAttribute("disabled", false);
+  }
+}
+
+async function deleteStructuredSource(sourceId) {
+  if (!sourceId) return;
+  const source = structuredSources.find((item) => item.source_id === sourceId);
+  const confirmed = await CEREBROUI.confirm({
+    title: "Remove project PDF source",
+    message: `Remove ${source?.primary_filename || "this PDF source"} from the project library?`,
+    details: ["Existing extraction jobs keep their own source copies and will not be changed."],
+    confirmLabel: "Remove source",
+    danger: true,
+  });
+  if (!confirmed) return;
+  const response = await fetch(withProject(`/api/structured/sources/${encodeURIComponent(sourceId)}`), { method: "DELETE" });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    setSourceImportStatus(payload.detail || "Could not remove the PDF source.", "failed");
+    return;
+  }
+  structuredSources = payload.sources || [];
+  selectedSourceIds.delete(sourceId);
+  persistSelectedSourceIds();
+  renderStructuredSourceLibrary();
+  renderStructuredSourcePicker();
+  setSourceImportStatus("Removed the source from the project PDF library.", "complete");
+}
+
+function setSourceImportStatus(message, tone = "") {
+  if (!sourceImportStatusLine) return;
+  sourceImportStatusLine.textContent = message || "";
+  sourceImportStatusLine.className = `queue-hint ${tone || ""}`.trim();
 }
 
 function renderSelectedModelPreset() {
@@ -396,7 +808,13 @@ function selectedPreset() {
 }
 
 async function loadSheets() {
-  const response = await fetch(withProject("/api/structured/sheets"));
+  if (!activeWorkbook?.workbook_id) {
+    sheets = [];
+    activeSheet = null;
+    renderActiveSheet();
+    return;
+  }
+  const response = await fetch(withWorkbook("/api/structured/sheets"));
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     setStatus(payload.detail || "Could not load structured sheets.", "failed");
@@ -418,7 +836,7 @@ async function createWorkbookSheet(options = {}) {
     const saved = await saveActiveSheet({ silent: true, requireReady: false });
     if (!saved) return;
   }
-  const body = buildProjectFormData();
+  const body = buildWorkbookFormData();
   body.append("name", nextSheetName());
   body.append("context", "");
   body.append("row_unit", "");
@@ -667,7 +1085,7 @@ async function saveActiveSheet(options = {}) {
   window.clearTimeout(autosaveTimer);
   isSavingSheet = true;
   setSheetStatus("Saving...", "queued");
-  const body = buildProjectFormData();
+  const body = buildWorkbookFormData();
   body.append("name", activeSheet.name);
   body.append("context", activeSheet.context || "");
   body.append("row_unit", activeSheet.row_unit || "");
@@ -720,7 +1138,7 @@ async function deleteActiveSheet() {
     danger: true,
   });
   if (!confirmed) return;
-  const response = await fetch(withProject(`/api/structured/sheets/${encodeURIComponent(activeSheet.sheet_id)}`), { method: "DELETE" });
+  const response = await fetch(withWorkbook(`/api/structured/sheets/${encodeURIComponent(activeSheet.sheet_id)}`), { method: "DELETE" });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     setStatus(payload.detail || "Could not delete sheet.", "failed");
@@ -743,7 +1161,7 @@ async function duplicateActiveSheet() {
     const saved = await saveActiveSheet({ silent: true, requireReady: false });
     if (!saved) return;
   }
-  const body = buildProjectFormData();
+  const body = buildWorkbookFormData();
   const response = await fetch(`/api/structured/sheets/${encodeURIComponent(activeSheet.sheet_id)}/duplicate`, {
     method: "POST",
     body,
@@ -815,21 +1233,21 @@ async function duplicateSelectedWorkbookSheets() {
     return;
   }
   confirmDuplicateWorkbookButton.disabled = true;
-  duplicateWorkbookStatus.textContent = "Creating workbook copy...";
+  duplicateWorkbookStatus.textContent = "Creating project copy...";
   duplicateWorkbookStatus.className = "prompt-status queued";
-  const body = buildProjectFormData();
+  const body = buildWorkbookFormData();
   body.append("sheet_ids", JSON.stringify(selectedSheetIds));
   try {
     const response = await fetch("/api/structured/workbook/duplicate", { method: "POST", body });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.detail || "Could not duplicate workbook.");
+    if (!response.ok) throw new Error(payload.detail || "Could not duplicate project.");
     const dashboardPath = payload.project?.dashboard_path;
-    if (!dashboardPath) throw new Error("The new workbook was created without a dashboard path.");
-    duplicateWorkbookStatus.textContent = `Created ${payload.project.name}. Opening workbook...`;
+    if (!dashboardPath) throw new Error("The new project was created without a dashboard path.");
+    duplicateWorkbookStatus.textContent = `Created ${payload.project.name}. Opening project...`;
     duplicateWorkbookStatus.className = "prompt-status complete";
     window.location.assign(dashboardPath);
   } catch (error) {
-    duplicateWorkbookStatus.textContent = error.message || "Could not duplicate workbook.";
+    duplicateWorkbookStatus.textContent = error.message || "Could not duplicate project.";
     duplicateWorkbookStatus.className = "prompt-status failed";
     confirmDuplicateWorkbookButton.disabled = false;
   }
@@ -841,7 +1259,7 @@ async function exportActiveSheetText() {
     const saved = await saveActiveSheet({ silent: true, requireReady: false });
     if (!saved) return;
   }
-  const response = await fetch(withProject(`/api/structured/sheets/${encodeURIComponent(activeSheet.sheet_id)}/import-text`));
+  const response = await fetch(withWorkbook(`/api/structured/sheets/${encodeURIComponent(activeSheet.sheet_id)}/import-text`));
   const text = await response.text();
   if (!response.ok) {
     let message = text || "Could not export sheet text.";
@@ -859,6 +1277,84 @@ async function exportActiveSheetText() {
   openModal(exportSheetTextModal);
   exportSheetTextOutput.focus();
   exportSheetTextOutput.select();
+}
+
+async function exportAllSheetTexts() {
+  if (!sheets.length) return;
+  if (hasUnsavedSheetChanges && !isActiveSheetLocked()) {
+    const saved = await saveActiveSheet({ silent: true, requireReady: false });
+    if (!saved) return;
+  }
+  isExportingAllSheetTexts = true;
+  setSheetStatus("Preparing all sheet prompts...", "queued");
+  try {
+    const response = await fetch(withWorkbook("/api/structured/workbook/import-text"));
+    const text = await response.text();
+    if (!response.ok) {
+      let message = text || "Could not export all sheet prompts.";
+      try {
+        message = JSON.parse(text).detail || message;
+      } catch (_error) {
+        // Keep the text response as the fallback error message.
+      }
+      throw new Error(message);
+    }
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    const projectSlug = downloadSafeName(document.body.dataset.currentProjectName || "project");
+    const workbookSlug = downloadSafeName(activeWorkbook?.name || "workbook");
+    anchor.download = `${projectSlug}_${workbookSlug}_structured_sheet_prompts.txt`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    setSheetStatus(`Exported editable prompt text for ${sheets.length} sheet${sheets.length === 1 ? "" : "s"}.`, "complete");
+  } catch (error) {
+    setSheetStatus(error.message || "Could not export all sheet prompts.", "failed");
+  } finally {
+    isExportingAllSheetTexts = false;
+    applySheetLockState();
+  }
+}
+
+async function exportActiveWorksheet() {
+  if (!activeSheet) return;
+  if (hasUnsavedSheetChanges && !isActiveSheetLocked()) {
+    const saved = await saveActiveSheet({ silent: true, requireReady: false });
+    if (!saved) return;
+  }
+  const exportingSheet = activeSheet;
+  if (!exportingSheet) return;
+  isExportingWorksheet = true;
+  setSheetStatus(`Preparing ${exportingSheet.name || "worksheet"}...`, "queued");
+  try {
+    const response = await fetch(
+      withWorkbook(`/api/structured/sheets/${encodeURIComponent(exportingSheet.sheet_id)}/export`),
+    );
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.detail || "Could not export worksheet.");
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    const projectSlug = downloadSafeName(document.body.dataset.currentProjectName || "project");
+    const sheetSlug = downloadSafeName(exportingSheet.name || "worksheet");
+    anchor.download = `cerebro_${projectSlug}_${sheetSlug}_structured_pdf_worksheet_export.xlsx`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    setSheetStatus(`Exported ${exportingSheet.name || "worksheet"}.`, "complete");
+  } catch (error) {
+    setSheetStatus(error.message || "Could not export worksheet.", "failed");
+  } finally {
+    isExportingWorksheet = false;
+    applySheetLockState();
+  }
 }
 
 async function copyExportedSheetText() {
@@ -900,6 +1396,7 @@ async function parsePastedColumns() {
   }
   const body = new FormData();
   body.append("project_id", currentProjectId);
+  if (activeWorkbook?.workbook_id) body.append("workbook_id", activeWorkbook.workbook_id);
   body.append("sheet_id", activeSheet.sheet_id || "");
   body.append("block_text", pasteColumnsInput.value);
   body.append("current_name", sheetNameInput.value || "");
@@ -980,7 +1477,7 @@ function confirmImportOverwrite(conflicts) {
 }
 
 async function submitStructuredJobs() {
-  if (!activeSheet) {
+  if (!activeWorkbook?.workbook_id || !activeSheet) {
     setStatus("Create or select a structured sheet first.", "failed");
     return;
   }
@@ -994,15 +1491,17 @@ async function submitStructuredJobs() {
     const saved = await saveActiveSheet({ silent: true, requireReady: true });
     if (!saved) return;
   }
-  const files = collectPdfFiles();
-  if (!files.length) {
-    setStatus("Choose at least one PDF.", "failed");
+  const sourceIds = structuredSources
+    .map((source) => String(source.source_id || ""))
+    .filter((sourceId) => selectedSourceIds.has(sourceId));
+  if (!sourceIds.length) {
+    setStatus("Choose one or more imported PDF sources before running this sheet.", "failed");
     return;
   }
   if (!isActiveSheetLocked()) {
     const confirmed = await CEREBROUI.confirm({
       title: "Run and lock this sheet",
-      message: `Queue ${files.length} PDF${files.length === 1 ? "" : "s"} using ${activeSheet.name || "this sheet"}?`,
+      message: `Queue ${sourceIds.length} study ${sourceIds.length === 1 ? "source" : "sources"} using ${activeSheet.name || "this sheet"}?`,
       details: ["The sheet schema becomes read-only when the first job is queued.", "Duplicate the sheet later to test a different schema."],
       confirmLabel: "Run and lock sheet",
     });
@@ -1010,7 +1509,7 @@ async function submitStructuredJobs() {
   }
   runStructuredButton.disabled = true;
   try {
-    const body = buildUploadFormData(files);
+    const body = buildStructuredSourceRunFormData(sourceIds);
     const response = await fetch("/api/structured/jobs", { method: "POST", body });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.detail || "Could not queue structured PDF jobs.");
@@ -1021,7 +1520,6 @@ async function submitStructuredJobs() {
     }
     setStatus(`Queued ${payload.count || 0} structured PDF job${payload.count === 1 ? "" : "s"}.`, "queued");
     setSheetStatus(`Queued ${payload.count || 0} job${payload.count === 1 ? "" : "s"}. Sheet schema is now locked for reproducibility.`, "complete");
-    clearFileInputs();
     await refreshJobs();
     structuredTableViewport.scrollTop = 0;
     await loadRows(0, { force: true });
@@ -1032,18 +1530,15 @@ async function submitStructuredJobs() {
   }
 }
 
-function buildUploadFormData(files) {
+function buildStructuredSourceRunFormData(sourceIds) {
   const body = buildSettingsFormData();
   body.append("sheet_id", activeSheet.sheet_id);
-  for (const file of files) {
-    body.append("pdfs", file, uploadName(file));
-    body.append("pdf_relative_paths", file.webkitRelativePath || file.name);
-  }
+  body.append("source_ids", JSON.stringify(sourceIds));
   return body;
 }
 
 function buildSettingsFormData() {
-  const body = buildProjectFormData();
+  const body = buildWorkbookFormData();
   const data = new FormData(structuredForm);
   for (const field of ["ocr_dpi", "ocr_batch_size", "deepseek_ocr_model_path", "rq_model_preset", "openai_api_key"]) {
     if (data.has(field)) body.append(field, data.get(field) || "");
@@ -1053,32 +1548,12 @@ function buildSettingsFormData() {
   return body;
 }
 
-function collectPdfFiles() {
-  const byKey = new Map();
-  for (const file of [...pdfInput.files, ...folderInput.files]) {
-    if (!file.name.toLowerCase().endsWith(".pdf")) continue;
-    const key = `${file.webkitRelativePath || file.name}:${file.size}:${file.lastModified}`;
-    byKey.set(key, file);
-  }
-  return [...byKey.values()];
-}
-
 function updateUploadSummaries() {
-  pdfInputSummary.textContent = uploadSummary([...pdfInput.files], "No files selected", "PDF");
-  folderInputSummary.textContent = uploadSummary([...folderInput.files], "No folder selected", "PDF in folder");
-}
-
-function uploadSummary(files, emptyText, singularLabel) {
-  const pdfFiles = files.filter((file) => file.name.toLowerCase().endsWith(".pdf"));
-  if (!pdfFiles.length) return emptyText;
-  if (pdfFiles.length === 1) return `1 ${singularLabel}: ${displayUploadName(pdfFiles[0])}`;
-  return `${pdfFiles.length} PDFs selected`;
+  studyBundlePicker?.refresh();
 }
 
 function clearFileInputs() {
-  pdfInput.value = "";
-  folderInput.value = "";
-  updateUploadSummaries();
+  studyBundlePicker?.clear();
 }
 
 function uploadName(file) {
@@ -1112,14 +1587,24 @@ function scheduleStructuredPolling(delay = null) {
 }
 
 async function refreshJobs(offset = structuredJobsVisibleOffset(), options = {}) {
+  if (!activeWorkbook?.workbook_id) {
+    jobs = [];
+    structuredJobWindow = { offset: 0, limit: STRUCTURED_JOB_WINDOW_LIMIT, total: 0, items: [], sheetId: "" };
+    structuredJobCounts = { all: 0, running: 0, queued: 0, completed: 0, failed: 0, parse_error: 0 };
+    structuredQueueState = {};
+    renderJobs({});
+    return;
+  }
   const safeOffset = Math.max(0, Number(offset || 0));
   const sheetId = activeSheet?.sheet_id || "";
-  const requestKey = `${sheetId}:${safeOffset}`;
+  const workbookId = activeWorkbook.workbook_id;
+  const requestKey = `${workbookId}:${sheetId}:${safeOffset}`;
   if (!options.force && requestKey === structuredJobRequestKey) return;
   if (!options.force && structuredJobWindow.offset <= safeOffset && safeOffset < structuredJobWindow.offset + Math.max(1, structuredJobWindow.limit - 30)) return;
   structuredJobRequestKey = requestKey;
   const params = new URLSearchParams({
     project_id: currentProjectId,
+    workbook_id: workbookId,
     sheet_id: sheetId,
     offset: String(safeOffset),
     limit: String(STRUCTURED_JOB_WINDOW_LIMIT),
@@ -1193,7 +1678,7 @@ function structuredJobsVisibleOffset() {
 function setStructuredSetupCollapsed(collapsed) {
   structuredSetupBody?.classList.toggle("hidden", collapsed);
   toggleStructuredSetupButton?.setAttribute("aria-expanded", collapsed ? "false" : "true");
-  if (toggleStructuredSetupButton) toggleStructuredSetupButton.textContent = collapsed ? "Configure new run" : "Hide setup";
+  if (toggleStructuredSetupButton) toggleStructuredSetupButton.textContent = collapsed ? "Show import" : "Hide import";
 }
 
 function setStructuredSchemaCollapsed(collapsed) {
@@ -1203,12 +1688,18 @@ function setStructuredSchemaCollapsed(collapsed) {
   if (toggleStructuredSchemaButton) toggleStructuredSchemaButton.textContent = collapsed ? "View schema details" : "Hide schema details";
 }
 
+function setStructuredResultsCollapsed(collapsed) {
+  structuredResultsContent?.classList.toggle("hidden", collapsed);
+  toggleStructuredResultsButton?.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  if (toggleStructuredResultsButton) toggleStructuredResultsButton.textContent = collapsed ? "Show results" : "Hide results";
+}
+
 async function loadRows(offset = visibleOffset(), options = {}) {
   if ((activeSheet?.sheet_id || "") !== structuredJobWindow.sheetId) {
     structuredJobsList.scrollTop = 0;
     await refreshJobs(0, { force: true });
   }
-  if (!activeSheet?.sheet_id) {
+  if (!activeWorkbook?.workbook_id || !activeSheet?.sheet_id) {
     rowWindow = { offset: 0, limit: WINDOW_LIMIT, items: [], total: 0, search: "", sheetId: "" };
     renderRows();
     return;
@@ -1220,6 +1711,7 @@ async function loadRows(offset = visibleOffset(), options = {}) {
   }
   const params = new URLSearchParams({
     project_id: currentProjectId,
+    workbook_id: activeWorkbook.workbook_id,
     sheet_id: activeSheet.sheet_id,
     offset: String(safeOffset),
     limit: String(WINDOW_LIMIT),
@@ -1413,7 +1905,7 @@ async function showJobResult(jobId, trigger) {
     subtitle: jobId,
     trigger,
   });
-  const response = await fetch(withProject(`/api/structured/jobs/${encodeURIComponent(jobId)}/result`));
+  const response = await fetch(withWorkbook(`/api/structured/jobs/${encodeURIComponent(jobId)}/result`));
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     inspector.setContent(`<p class="queue-error">${escapeHtml(payload.detail || "Could not load job result.")}</p>`);
@@ -1483,6 +1975,10 @@ function applySheetLockState() {
   addColumnButton.disabled = locked || !hasSheet;
   pasteColumnsButton.disabled = locked || !hasSheet;
   if (exportSheetTextButton) exportSheetTextButton.disabled = !hasSheet;
+  if (exportAllSheetTextsButton) exportAllSheetTextsButton.disabled = !sheets.length || isExportingAllSheetTexts;
+  if (structuredWorksheetExportButton) {
+    structuredWorksheetExportButton.disabled = !hasSheet || isExportingWorksheet;
+  }
   saveSheetButton.disabled = locked || !hasSheet || isSavingSheet;
   if (duplicateSheetButton) duplicateSheetButton.disabled = !hasSheet;
   if (duplicateWorkbookButton) duplicateWorkbookButton.disabled = !hasSheet;

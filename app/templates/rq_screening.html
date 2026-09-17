@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>CEREBRO</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260604-text" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260916-study-bundles" />
   </head>
   <body data-current-project-id="{{ current_project.project_id }}" data-current-project-name="{{ current_project.name }}" data-current-project-type="{{ current_project.extraction_type }}">
     <div class="neural-backdrop" aria-hidden="true"></div>
@@ -91,22 +91,41 @@
           <div id="pdfSetupBody">
           <div class="grid">
             <div class="file-picker upload-card">
-              <span class="file-picker-label">PDF files</span>
-              <strong>Single batch upload</strong>
+              <span class="file-picker-label">Primary PDFs</span>
+              <strong>One job per study</strong>
               <div class="file-picker-row">
                 <button id="chooseFilesButton" type="button">Choose files</button>
-                <span id="pdfInputSummary" class="file-picker-summary">No files selected</span>
+                <span id="pdfInputSummary" class="file-picker-summary">No primary PDFs selected</span>
               </div>
               <input id="pdfInput" class="visually-hidden-file" type="file" accept="application/pdf,.pdf" multiple />
             </div>
             <div class="file-picker upload-card">
-              <span class="file-picker-label">PDF folder</span>
-              <strong>Folder scan</strong>
+              <span class="file-picker-label">Supporting files</span>
+              <strong>PDF, XLSX, or CSV</strong>
+              <div class="file-picker-row">
+                <button id="chooseSupportingFilesButton" type="button">Attach files</button>
+                <span id="supportingInputSummary" class="file-picker-summary">No supporting files selected</span>
+              </div>
+              <input id="supportingInput" class="visually-hidden-file" type="file" accept="application/pdf,.pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx,text/csv,.csv" multiple />
+            </div>
+            <div class="file-picker upload-card span-2">
+              <span class="file-picker-label">Study folder</span>
+              <strong>Pair source files automatically</strong>
               <div class="file-picker-row">
                 <button id="chooseFolderButton" type="button">Choose folder</button>
-                <span id="folderInputSummary" class="file-picker-summary">No folder selected</span>
+                <span id="folderInputSummary" class="file-picker-summary">No supported files in folder</span>
               </div>
-              <input id="folderInput" class="visually-hidden-file" type="file" accept="application/pdf,.pdf" webkitdirectory directory multiple />
+              <input id="folderInput" class="visually-hidden-file" type="file" accept="application/pdf,.pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx,text/csv,.csv" webkitdirectory directory multiple />
+            </div>
+            <div id="studyBundleReview" class="study-bundle-review span-2 hidden" aria-live="polite">
+              <div class="study-bundle-head">
+                <div>
+                  <p class="eyebrow">Study bundles</p>
+                  <h3>Primary PDF and supporting sources</h3>
+                </div>
+                <p id="studyBundleSummary" class="section-subtitle"></p>
+              </div>
+              <div id="studyBundleList" class="study-bundle-list"></div>
             </div>
 
             <div class="settings-card span-2">
@@ -132,7 +151,7 @@
                   <input id="openaiInputFileCheckbox" type="checkbox" checked />
                   <span>
                     <strong>OpenAI file/source extraction</strong>
-                    <small>Attach the PDF as a source so figures, tables, and page layout can be considered.</small>
+                    <small>Attach the primary PDF and any supporting files as source material for the same study.</small>
                   </span>
                 </label>
               </div>
@@ -356,6 +375,7 @@
     <script id="projectData" type="application/json">{{ projects | tojson }}</script>
     <script id="modelPresetData" type="application/json">{{ model_presets | tojson }}</script>
     <script src="/static/ui_helpers.js?v=20260720-usability"></script>
-    <script src="/static/rq_screening.js?v=20260720-usability"></script>
+    <script src="/static/study_bundles.js?v=20260916-study-bundles"></script>
+    <script src="/static/rq_screening.js?v=20260916-study-bundles"></script>
   </body>
 </html>

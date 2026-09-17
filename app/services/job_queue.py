@@ -268,7 +268,10 @@ class JobQueue:
         if stale:
             logger.warning("Handled %s stale running RQ screening jobs", len(stale))
         restored = 0
-        for project_id in _known_project_ids():
+        # Text rows are restored by TextJobQueue. Avoid reading every one of
+        # their job folders here before that queue can build its lightweight
+        # index, particularly when project data lives in cloud storage.
+        for project_id in _known_non_text_project_ids():
             for record in reversed(jobs.list_jobs(limit=0, project_id=project_id)):
                 status = record.get("status") or {}
                 if _is_text_extraction_record(record):
@@ -473,10 +476,23 @@ def _known_project_ids() -> list[str | None]:
         return [None]
 
 
+def _known_non_text_project_ids() -> list[str | None]:
+    try:
+        from app.services import projects
+
+        return [
+            str(project["project_id"])
+            for project in projects.list_projects()
+            if projects.normalize_extraction_type(project.get("extraction_type")) != "text"
+        ]
+    except Exception:
+        return [None]
+
+
 def _project_ids_for_scope(project_id: str | None) -> list[str | None]:
     if project_id is not None:
         return [project_id]
-    return _known_project_ids()
+    return _known_non_text_project_ids()
 
 
 def _openai_active_keys(*, project_id: str | None = None) -> set[str]:

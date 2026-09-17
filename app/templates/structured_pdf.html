@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Structured PDF Extraction | CEREBRO</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260720-workbook-duplicate" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260916-structured-workbooks-run-settings" />
   </head>
   <body data-current-project-id="{{ current_project.project_id }}" data-current-project-name="{{ current_project.name }}" data-current-project-type="{{ current_project.extraction_type }}">
     <div class="neural-backdrop" aria-hidden="true"></div>
@@ -71,106 +71,156 @@
       </header>
 
       <section class="workflow-strip structured-workflow-strip" aria-label="CEREBRO structured PDF workflow">
-        <div><span>01</span><strong>PDF intake</strong><small>Upload source files</small></div>
-        <div><span>02</span><strong>Spreadsheet</strong><small>Name table columns</small></div>
-        <div><span>03</span><strong>Structured sheet</strong><small>Questions and rules</small></div>
-        <div><span>04</span><strong>Export</strong><small>Excel worksheets</small></div>
+        <div><span>01</span><strong>PDF library</strong><small>Import reusable study bundles</small></div>
+        <div><span>02</span><strong>Workbooks</strong><small>Choose an extraction workspace</small></div>
+        <div><span>03</span><strong>Worksheets</strong><small>Define columns, questions, and rules</small></div>
+        <div><span>04</span><strong>Results</strong><small>Review and export sheet data</small></div>
       </section>
 
+      <nav class="structured-workspace-tabs" aria-label="Structured PDF workspace">
+        <button id="structuredLibraryTab" class="structured-workspace-tab active" type="button" data-structured-view="library" aria-selected="true">PDF library</button>
+        <button id="structuredWorkbooksTab" class="structured-workspace-tab" type="button" data-structured-view="workbooks" aria-selected="false">Workbooks</button>
+      </nav>
+
+      <section id="structuredLibraryView" class="structured-workspace-view">
       <section class="panel intake-panel structured-run-panel">
-        <form id="structuredJobForm">
+        <form id="structuredSourceImportForm">
           <div class="section-head">
             <div>
-              <p class="eyebrow">PDF intake</p>
-              <h2>Upload and run structured extraction</h2>
+              <p class="eyebrow">PDF library</p>
+              <h2>Import reusable study sources</h2>
             </div>
             <div class="actions">
-              <span class="panel-kicker">PDF to TSV rows</span>
-              <button id="toggleStructuredSetupButton" class="secondary-button" type="button" aria-expanded="true" aria-controls="structuredSetupBody">Hide setup</button>
+              <span class="panel-kicker">Primary PDF + attachments</span>
+              <button id="toggleStructuredSetupButton" class="secondary-button" type="button" aria-expanded="true" aria-controls="structuredSetupBody">Hide import</button>
             </div>
           </div>
           <div id="structuredSetupBody">
           <div class="grid">
             <div class="file-picker upload-card">
-              <span class="file-picker-label">PDF files</span>
-              <strong>Single batch upload</strong>
+              <span class="file-picker-label">Primary PDFs</span>
+              <strong>One job per study</strong>
               <div class="file-picker-row">
                 <button id="chooseFilesButton" type="button">Choose files</button>
-                <span id="pdfInputSummary" class="file-picker-summary">No files selected</span>
+                <span id="pdfInputSummary" class="file-picker-summary">No primary PDFs selected</span>
               </div>
               <input id="pdfInput" class="visually-hidden-file" type="file" accept="application/pdf,.pdf" multiple />
             </div>
             <div class="file-picker upload-card">
-              <span class="file-picker-label">PDF folder</span>
-              <strong>Folder scan</strong>
+              <span class="file-picker-label">Supporting files</span>
+              <strong>PDF, XLSX, or CSV</strong>
+              <div class="file-picker-row">
+                <button id="chooseSupportingFilesButton" type="button">Attach files</button>
+                <span id="supportingInputSummary" class="file-picker-summary">No supporting files selected</span>
+              </div>
+              <input id="supportingInput" class="visually-hidden-file" type="file" accept="application/pdf,.pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx,text/csv,.csv" multiple />
+            </div>
+            <div class="file-picker upload-card span-2">
+              <span class="file-picker-label">Study folder</span>
+              <strong>Pair source files automatically</strong>
               <div class="file-picker-row">
                 <button id="chooseFolderButton" type="button">Choose folder</button>
-                <span id="folderInputSummary" class="file-picker-summary">No folder selected</span>
+                <span id="folderInputSummary" class="file-picker-summary">No supported files in folder</span>
               </div>
-              <input id="folderInput" class="visually-hidden-file" type="file" accept="application/pdf,.pdf" webkitdirectory directory multiple />
+              <input id="folderInput" class="visually-hidden-file" type="file" accept="application/pdf,.pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx,text/csv,.csv" webkitdirectory directory multiple />
+            </div>
+            <div id="studyBundleReview" class="study-bundle-review span-2 hidden" aria-live="polite">
+              <div class="study-bundle-head">
+                <div>
+                  <p class="eyebrow">Study bundles</p>
+                  <h3>Primary PDF and supporting sources</h3>
+                </div>
+                <p id="studyBundleSummary" class="section-subtitle"></p>
+              </div>
+              <div id="studyBundleList" class="study-bundle-list"></div>
             </div>
 
-            <div class="settings-card span-2">
-              <div class="subsection-title">
-                <span>Extraction route</span>
-              </div>
-              <div class="model-grid">
-                <label class="field model-field">
-                  <span>Model preset</span>
-                  <select id="modelPresetSelect" name="rq_model_preset">
-                    {% for preset in model_presets %}
-                    <option value="{{ preset.id }}" {% if defaults.rq_model_preset == preset.id %}selected{% endif %}>{{ preset.label }}</option>
-                    {% endfor %}
-                  </select>
-                </label>
-                <label id="openaiApiKeyField" class="field hidden">
-                  <span>OpenAI API key</span>
-                  <input name="openai_api_key" type="password" autocomplete="off" placeholder="Paste API key, use OPENAI_API_KEY, or data/api_key.txt" />
-                </label>
-              </div>
-              <div id="openaiInputModeField" class="pipeline-switch hidden">
-                <label class="inline-check pipeline-option">
-                  <input id="openaiInputFileCheckbox" type="checkbox" checked />
-                  <span>
-                    <strong>OpenAI file/source extraction</strong>
-                    <small>Attach each PDF as source material for table, figure, and layout-aware extraction.</small>
-                  </span>
-                </label>
-              </div>
-            </div>
-
-            <div class="settings-card span-2">
-              <div class="subsection-title">
-                <span>OCR settings</span>
-              </div>
-              <div class="model-grid">
-                <label class="field">
-                  <span>OCR DPI</span>
-                  <input name="ocr_dpi" type="number" min="72" max="400" value="{{ defaults.ocr_dpi }}" />
-                </label>
-                <label class="field">
-                  <span>OCR batch size</span>
-                  <input name="ocr_batch_size" type="number" min="1" max="8" value="{{ defaults.ocr_batch_size }}" />
-                </label>
-              </div>
-              <label class="field">
-                <span>DeepSeekOCR2 model path</span>
-                <input name="deepseek_ocr_model_path" type="text" placeholder="Auto-detects DeepSeek-OCR-2-8bit by default, or paste local path" />
-              </label>
-            </div>
           </div>
           <div class="form-footer">
             <div>
-              <div id="structuredStatusLine" class="queue-hint">Complete the sheet schema, then upload PDFs.</div>
-              <div class="queue-hint">The selected sheet schema becomes read-only as soon as its first job is queued.</div>
+              <div id="sourceImportStatusLine" class="queue-hint">Import a study once, then reuse it in any workbook in this project.</div>
+              <div class="queue-hint">The source library preserves the primary PDF and its supporting files together.</div>
             </div>
-            <button id="runStructuredButton" type="submit">Run structured extraction</button>
+            <button id="importStructuredSourcesButton" type="submit">Import selected studies</button>
           </div>
           </div>
         </form>
       </section>
 
+      <section class="panel structured-source-library-panel">
+        <div class="section-head compact">
+          <div>
+            <p class="eyebrow">Imported sources</p>
+            <h2>Project PDF library</h2>
+            <p id="structuredSourcesSummary" class="section-subtitle">No study bundles have been imported.</p>
+          </div>
+          <button id="refreshStructuredSourcesButton" type="button">Refresh</button>
+        </div>
+        <div id="structuredSourcesList" class="structured-source-library-list" aria-live="polite"></div>
+      </section>
+      </section>
+
+      <section id="structuredWorkbookView" class="structured-workspace-view hidden">
       <section class="panel structured-results-panel">
+        <section class="settings-card structured-extraction-route">
+          <div class="subsection-title">
+            <span>Extraction route</span>
+          </div>
+          <div class="model-grid">
+            <label class="field model-field">
+              <span>Model preset</span>
+              <select id="modelPresetSelect" name="rq_model_preset" form="structuredJobForm">
+                {% for preset in model_presets %}
+                <option value="{{ preset.id }}" {% if defaults.rq_model_preset == preset.id %}selected{% endif %}>{{ preset.label }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label id="openaiApiKeyField" class="field hidden">
+              <span>OpenAI API key</span>
+              <input name="openai_api_key" form="structuredJobForm" type="password" autocomplete="off" placeholder="Paste API key, use OPENAI_API_KEY, or data/api_key.txt" />
+            </label>
+          </div>
+          <div id="openaiInputModeField" class="pipeline-switch hidden">
+            <label class="inline-check pipeline-option">
+              <input id="openaiInputFileCheckbox" form="structuredJobForm" type="checkbox" checked />
+              <span>
+                <strong>OpenAI file/source extraction</strong>
+                <small>Use the selected primary PDF and supporting files as source material for table, figure, and layout-aware extraction.</small>
+              </span>
+            </label>
+          </div>
+        </section>
+
+        <section class="settings-card structured-ocr-settings">
+          <div class="subsection-title">
+            <span>OCR settings</span>
+          </div>
+          <div class="model-grid">
+            <label class="field">
+              <span>OCR DPI</span>
+              <input name="ocr_dpi" form="structuredJobForm" type="number" min="72" max="400" value="{{ defaults.ocr_dpi }}" />
+            </label>
+            <label class="field">
+              <span>OCR batch size</span>
+              <input name="ocr_batch_size" form="structuredJobForm" type="number" min="1" max="8" value="{{ defaults.ocr_batch_size }}" />
+            </label>
+          </div>
+          <label class="field">
+            <span>DeepSeekOCR2 model path</span>
+            <input name="deepseek_ocr_model_path" form="structuredJobForm" type="text" placeholder="Auto-detects DeepSeek-OCR-2-8bit by default, or paste local path" />
+          </label>
+        </section>
+
+        <div class="structured-workbook-toolbar">
+          <label class="field structured-workbook-select-field">
+            <span>Active workbook</span>
+            <select id="structuredWorkbookSelect" aria-label="Active structured workbook"></select>
+          </label>
+          <div class="actions">
+            <button id="newStructuredWorkbookButton" type="button">+ Workbook</button>
+            <button id="duplicateActiveWorkbookButton" type="button">Duplicate workbook</button>
+          </div>
+        </div>
         <div class="section-head">
           <div>
             <p class="eyebrow">Workbook schema</p>
@@ -181,9 +231,10 @@
             <button id="toggleStructuredSchemaButton" class="secondary-button" type="button" aria-expanded="true">Hide schema details</button>
             <button id="saveSheetButton" type="button">Save sheet</button>
             <button id="duplicateSheetButton" type="button">Duplicate sheet</button>
-            <button id="duplicateWorkbookButton" type="button">Duplicate workbook</button>
+            <button id="duplicateWorkbookButton" type="button">Duplicate project</button>
             <button id="deleteSheetButton" class="danger-button" type="button">Delete sheet</button>
-            <a id="structuredExportLink" class="button" href="/api/structured/export">Export workbook</a>
+            <button id="structuredWorksheetExportButton" type="button">Export worksheet</button>
+            <a id="structuredExportLink" class="button" href="/api/structured/export">Export active workbook</a>
           </div>
         </div>
         <p id="sheetLockNotice" class="sheet-lock-notice hidden">This sheet schema is locked for reproducibility because extraction has been queued or run. Duplicate it to edit the schema.</p>
@@ -216,36 +267,6 @@
         </form>
         </div>
 
-        <div class="section-head compact structured-spreadsheet-head">
-          <div>
-            <p class="eyebrow">Structured rows</p>
-            <h3>Workbook grid</h3>
-            <p id="structuredRowsSummary" class="section-subtitle">No sheet selected.</p>
-          </div>
-          <span class="status-dot" aria-hidden="true"></span>
-        </div>
-        <div class="queue-filter-panel structured-filter-panel">
-          <div class="job-search-field">
-            <label class="visually-hidden" for="structuredSearchInput">Search structured rows</label>
-            <input id="structuredSearchInput" type="search" placeholder="Search rows, PDFs, errors..." autocomplete="off" />
-            <button id="clearStructuredSearchButton" class="search-clear-button" type="button" aria-label="Clear search" title="Clear search">
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M6 6l12 12M18 6L6 18"></path>
-              </svg>
-            </button>
-          </div>
-        </div>
-        <div class="structured-table-shell">
-          <div id="structuredTableHeader" class="structured-table-header structured-table-grid"></div>
-          <div id="structuredTableViewport" class="structured-table-viewport" tabindex="0">
-            <div id="structuredVirtualSpacer" class="structured-virtual-spacer"></div>
-            <div id="structuredVirtualRows" class="structured-virtual-rows"></div>
-          </div>
-          <button id="addColumnDivider" class="excel-add-column-divider" type="button" aria-label="Add column at active boundary" title="Add column">
-            <span aria-hidden="true">+</span>
-          </button>
-        </div>
-
         <div id="structuredColumnInstructions">
         <div class="column-editor-head structured-column-instructions-head">
           <div>
@@ -254,6 +275,7 @@
           </div>
           <div class="actions">
             <button id="exportSheetTextButton" type="button">Export sheet text</button>
+            <button id="exportAllSheetTextsButton" type="button" title="Download editable prompt text for every sheet">Export all sheet prompts</button>
             <button id="pasteColumnsButton" type="button">Paste sheet / columns</button>
             <button id="addColumnButton" type="button">+ Column</button>
           </div>
@@ -265,30 +287,92 @@
           <pre id="compiledPromptPreview"></pre>
         </details>
         </div>
-      </section>
 
-      <section class="panel structured-errors-panel">
-        <div class="section-head compact">
+        <form id="structuredJobForm" class="structured-run-form">
+          <div class="structured-source-selection">
+            <div class="section-head compact">
+              <div>
+                <p class="eyebrow">Sources to run</p>
+                <h3>Project PDF library</h3>
+                <p id="structuredSourceSelectionSummary" class="section-subtitle">Choose imported study bundles for this worksheet.</p>
+              </div>
+              <div class="actions">
+                <button id="selectAllStructuredSourcesButton" type="button">Select all</button>
+                <button id="clearStructuredSourcesButton" type="button">Clear</button>
+              </div>
+            </div>
+            <div id="structuredSourcePickerList" class="structured-source-picker-list"></div>
+          </div>
+
+          <div class="form-footer">
+            <div>
+              <div id="structuredStatusLine" class="queue-hint">Choose imported sources, then run the active sheet.</div>
+              <div class="queue-hint">The selected sheet schema becomes read-only as soon as its first job is queued.</div>
+            </div>
+            <button id="runStructuredButton" type="submit">Run selected sources</button>
+          </div>
+        </form>
+
+        <section id="structuredResultsSection" class="structured-results-section">
+        <div class="section-head compact structured-spreadsheet-head">
           <div>
-            <p class="eyebrow">Diagnostics</p>
-            <h2>Jobs and parse errors</h2>
+            <p class="eyebrow">Structured rows</p>
+            <h3>Workbook grid</h3>
+            <p id="structuredRowsSummary" class="section-subtitle">No sheet selected.</p>
           </div>
-          <button id="refreshStructuredButton" type="button">Refresh</button>
-        </div>
-        <p id="structuredJobsSummary" class="filter-summary">No structured jobs for this sheet.</p>
-        <div id="structuredJobsTableShell" class="structured-job-table-shell" role="grid" aria-label="Structured PDF jobs" aria-rowcount="0">
-          <div id="structuredJobsHeader" class="structured-job-table-header" role="row">
-            <span role="columnheader">Source PDF</span>
-            <span role="columnheader">Job status</span>
-            <span role="columnheader">Parse status</span>
-            <span role="columnheader">Model</span>
-            <span role="columnheader">Action</span>
-          </div>
-          <div id="structuredJobsList" class="structured-job-viewport" tabindex="0">
-            <div id="structuredJobsSpacer" class="structured-job-virtual-spacer"></div>
-            <div id="structuredJobsRows" class="structured-job-virtual-rows"></div>
+          <div class="actions">
+            <button id="toggleStructuredResultsButton" class="secondary-button" type="button" aria-expanded="true">Hide results</button>
+            <button id="refreshStructuredButton" type="button">Refresh</button>
           </div>
         </div>
+        <div id="structuredResultsContent">
+          <div class="queue-filter-panel structured-filter-panel">
+            <div class="job-search-field">
+              <label class="visually-hidden" for="structuredSearchInput">Search structured rows</label>
+              <input id="structuredSearchInput" type="search" placeholder="Search rows, PDFs, errors..." autocomplete="off" />
+              <button id="clearStructuredSearchButton" class="search-clear-button" type="button" aria-label="Clear search" title="Clear search">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M6 6l12 12M18 6L6 18"></path>
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div class="structured-table-shell">
+            <div id="structuredTableHeader" class="structured-table-header structured-table-grid"></div>
+            <div id="structuredTableViewport" class="structured-table-viewport" tabindex="0">
+              <div id="structuredVirtualSpacer" class="structured-virtual-spacer"></div>
+              <div id="structuredVirtualRows" class="structured-virtual-rows"></div>
+            </div>
+            <button id="addColumnDivider" class="excel-add-column-divider" type="button" aria-label="Add column at active boundary" title="Add column">
+              <span aria-hidden="true">+</span>
+            </button>
+          </div>
+
+          <div class="structured-inline-diagnostics">
+            <div class="section-head compact">
+              <div>
+                <p class="eyebrow">Runs and diagnostics</p>
+                <h3>Source job status</h3>
+              </div>
+            </div>
+            <p id="structuredJobsSummary" class="filter-summary">No structured jobs for this sheet.</p>
+            <div id="structuredJobsTableShell" class="structured-job-table-shell" role="grid" aria-label="Structured PDF jobs" aria-rowcount="0">
+              <div id="structuredJobsHeader" class="structured-job-table-header" role="row">
+                <span role="columnheader">Source PDF</span>
+                <span role="columnheader">Job status</span>
+                <span role="columnheader">Parse status</span>
+                <span role="columnheader">Model</span>
+                <span role="columnheader">Action</span>
+              </div>
+              <div id="structuredJobsList" class="structured-job-viewport" tabindex="0">
+                <div id="structuredJobsSpacer" class="structured-job-virtual-spacer"></div>
+                <div id="structuredJobsRows" class="structured-job-virtual-rows"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        </section>
+      </section>
       </section>
     </main>
 
@@ -350,7 +434,7 @@
         <div class="modal-head">
           <div>
             <p class="eyebrow">Project copy</p>
-            <h2 id="duplicateWorkbookTitle">Duplicate workbook</h2>
+            <h2 id="duplicateWorkbookTitle">Duplicate project</h2>
           </div>
           <button id="closeDuplicateWorkbookButton" class="icon-button" type="button" aria-label="Close workbook duplicate" title="Close">
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -371,7 +455,7 @@
           <div class="queue-hint">The new project contains editable sheet schemas only. PDFs, jobs, rows, and errors are not copied.</div>
           <div class="actions">
             <button id="cancelDuplicateWorkbookButton" type="button">Cancel</button>
-            <button id="confirmDuplicateWorkbookButton" type="button">Duplicate workbook</button>
+            <button id="confirmDuplicateWorkbookButton" type="button">Duplicate project</button>
           </div>
         </div>
       </div>
@@ -381,6 +465,7 @@
     <script id="projectData" type="application/json">{{ projects | tojson }}</script>
     <script id="modelPresetData" type="application/json">{{ model_presets | tojson }}</script>
     <script src="/static/ui_helpers.js?v=20260720-usability"></script>
-    <script src="/static/structured_pdf.js?v=20260720-usability"></script>
+    <script src="/static/study_bundles.js?v=20260916-study-bundles"></script>
+    <script src="/static/structured_pdf.js?v=20260916-structured-workbooks"></script>
   </body>
 </html>

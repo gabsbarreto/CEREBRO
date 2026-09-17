@@ -50,6 +50,7 @@ const pauseTextQueueButton = document.querySelector("#pauseTextQueueButton");
 const resumeTextQueueButton = document.querySelector("#resumeTextQueueButton");
 const retryFailedRowsButton = document.querySelector("#retryFailedRowsButton");
 const textExportLink = document.querySelector("#textExportLink");
+const textWorksheetExportButton = document.querySelector("#textWorksheetExportButton");
 const textStatusFilterButtons = [...document.querySelectorAll("[data-text-status-filter]")];
 const textSearchInput = document.querySelector("#textSearchInput");
 const clearTextSearchButton = document.querySelector("#clearTextSearchButton");
@@ -80,10 +81,13 @@ let loadedWindow = { offset: -1, limit: 0, items: [] };
 let windowRequestKey = "";
 let textPollingTimer = null;
 let lastTextCounts = { total: 0, not_run: 0, queued: 0, running: 0, completed: 0, failed: 0 };
+let textIndexReady = true;
+let textRestoreActive = false;
 let searchDebounceTimer = null;
 let autosaveTimer = null;
 let sheetDirty = false;
 let sheetSaveInFlight = false;
+let isExportingTextWorksheet = false;
 let inspectedColumns = [];
 let inspectedPreviewRows = [];
 
@@ -122,6 +126,7 @@ textSourceForm.addEventListener("submit", createWorkbookSource);
 textSheetForm.addEventListener("submit", runActiveSheet);
 addTextSheetButton.addEventListener("click", addTextSheet);
 duplicateTextSheetButton.addEventListener("click", duplicateActiveSheet);
+textWorksheetExportButton?.addEventListener("click", exportActiveTextWorksheet);
 textSheetTabsScrollLeft.addEventListener("click", () => textSheetTabs.scrollBy({ left: -260, behavior: "smooth" }));
 textSheetTabsScrollRight.addEventListener("click", () => textSheetTabs.scrollBy({ left: 260, behavior: "smooth" }));
 textSheetTabs.addEventListener("scroll", updateSheetTabScrollButtons);
@@ -291,6 +296,7 @@ function renderActiveSheet(sheet) {
   const exactState = sheet.status || (locked ? "locked" : "draft");
   runTextSheetButton.textContent = locked ? "Sheet locked" : "Run this sheet";
   duplicateTextSheetButton.disabled = false;
+  if (textWorksheetExportButton) textWorksheetExportButton.disabled = isExportingTextWorksheet;
   textSheetSaveStatus.textContent = locked ? "Prompt and model preserved from the first run." : "Sheet changes save automatically.";
   textSheetSaveStatus.className = "queue-hint";
   textSheetProvenanceSummary.textContent = locked
@@ -381,6 +387,45 @@ async function duplicateActiveSheet() {
     setTextStatus(error.message || "Could not duplicate the sheet.", "failed");
   } finally {
     duplicateTextSheetButton.disabled = false;
+  }
+}
+
+async function exportActiveTextWorksheet() {
+  if (!activeSheetId) return;
+  if (sheetDirty) {
+    const saved = await saveActiveSheet({ quiet: true });
+    if (!saved) return;
+  }
+  const exportingSheet = activeSheet();
+  if (!exportingSheet) return;
+  isExportingTextWorksheet = true;
+  textWorksheetExportButton.disabled = true;
+  setTextStatus(`Preparing ${exportingSheet.name || "worksheet"}...`, "running");
+  try {
+    const response = await fetch(
+      withProject(`/api/text/sheets/${encodeURIComponent(exportingSheet.sheet_id)}/export`),
+    );
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.detail || "Could not export worksheet.");
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    const projectSlug = downloadSafeName(currentProjectName || "project");
+    const sheetSlug = downloadSafeName(exportingSheet.name || "worksheet");
+    anchor.href = url;
+    anchor.download = `cerebro_${projectSlug}_${sheetSlug}_text_extraction_worksheet_export.xlsx`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    setTextStatus(`Exported ${exportingSheet.name || "worksheet"}.`, "complete");
+  } catch (error) {
+    setTextStatus(error.message || "Could not export worksheet.", "failed");
+  } finally {
+    isExportingTextWorksheet = false;
+    textWorksheetExportButton.disabled = !activeSheetId;
   }
 }
 
@@ -525,7 +570,7 @@ function startPolling() {
 
 function scheduleTextPolling(delay = null) {
   window.clearTimeout(textPollingTimer);
-  const active = Boolean(lastTextCounts.running || lastTextCounts.queued);
+  const active = Boolean(lastTextCounts.running || lastTextCounts.queued || textRestoreActive || !textIndexReady);
   const nextDelay = delay ?? (document.hidden ? 30000 : active ? 2500 : 15000);
   textPollingTimer = window.setTimeout(async () => {
     await refreshCounts();
@@ -539,13 +584,13 @@ async function refreshCounts() {
   try {
     const response = await fetch(withProject(`/api/text/jobs/counts?sheet_id=${encodeURIComponent(activeSheetId)}`));
     const payload = await response.json().catch(() => ({}));
-    if (response.ok) renderCounts(payload.counts || {}, payload.queue || {});
+    if (response.ok) renderCounts(payload.counts || {}, payload.queue || {}, payload.index_ready !== false);
   } catch (_error) {
     return;
   }
 }
 
-function renderCounts(counts, queue) {
+function renderCounts(counts, queue, indexReady = true) {
   const normalized = {
     total: Number(counts.total || 0),
     not_run: Number(counts.not_run || 0),
@@ -555,6 +600,9 @@ function renderCounts(counts, queue) {
     failed: Number(counts.failed || 0),
   };
   lastTextCounts = normalized;
+  textIndexReady = indexReady;
+  const restore = queue.restore || {};
+  textRestoreActive = restore.state === "restoring";
   const metrics = [
     ["Total", normalized.total, ""],
     ["Completed", normalized.completed, "complete"],
@@ -564,10 +612,21 @@ function renderCounts(counts, queue) {
     ["Not run", normalized.not_run, ""],
   ];
   textCounts.innerHTML = metrics.map(([label, value, tone]) => `<div class="stat-card ${tone}"><span>${label}</span><strong>${value.toLocaleString()}</strong></div>`).join("");
-  textQueueBadge.textContent = normalized.total ? `${normalized.completed.toLocaleString()} / ${normalized.total.toLocaleString()} complete` : "No rows";
-  textQueueBadge.className = `badge ${normalized.failed ? "failed" : normalized.running ? "running" : normalized.queued ? "queued" : normalized.completed ? "complete" : ""}`;
+  textQueueBadge.textContent = textRestoreActive
+    ? "Restoring queue"
+    : normalized.total ? `${normalized.completed.toLocaleString()} / ${normalized.total.toLocaleString()} complete` : "No rows";
+  textQueueBadge.className = `badge ${textRestoreActive ? "queued" : normalized.failed ? "failed" : normalized.running ? "running" : normalized.queued ? "queued" : normalized.completed ? "complete" : ""}`;
   const queueState = queue.paused ? "Shared text queue paused. " : "";
-  textStatusLine.textContent = `${queueState}${normalized.completed.toLocaleString()} completed, ${normalized.running.toLocaleString()} running, ${normalized.queued.toLocaleString()} queued, ${normalized.failed.toLocaleString()} failed.`;
+  if (textRestoreActive) {
+    const scanned = Number(restore.scanned || 0).toLocaleString();
+    const total = Number(restore.total || 0).toLocaleString();
+    const restored = Number(restore.restored || 0).toLocaleString();
+    textStatusLine.textContent = `${queueState}Restoring the queue index: ${scanned} / ${total} records scanned; ${restored} queued rows restored.`;
+  } else if (restore.state === "failed") {
+    textStatusLine.textContent = `${queueState}Queue restoration needs attention: ${restore.error || "the index could not be rebuilt."}`;
+  } else {
+    textStatusLine.textContent = `${queueState}${normalized.completed.toLocaleString()} completed, ${normalized.running.toLocaleString()} running, ${normalized.queued.toLocaleString()} queued, ${normalized.failed.toLocaleString()} failed.`;
+  }
   pauseTextQueueButton.disabled = Boolean(queue.paused);
   resumeTextQueueButton.disabled = !queue.paused;
   updateFilterCounts(normalized);
@@ -605,6 +664,7 @@ async function loadVisibleWindow(offset = visibleOffset(), options = {}) {
     const response = await fetch(`/api/text/jobs?${params.toString()}`);
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.detail || "Could not load rows.");
+    textIndexReady = payload.index_ready !== false;
     totalRows = Number(payload.total || 0);
     loadedWindow = { offset: Number(payload.offset || 0), limit: Number(payload.limit || WINDOW_LIMIT), items: payload.items || [] };
     renderVirtualRows();
@@ -628,6 +688,11 @@ function renderVirtualRows() {
   textVirtualRows.style.width = `${width}px`;
   textWorkbookTableShell?.setAttribute("aria-rowcount", String(totalRows));
   textWorkbookTableShell?.setAttribute("aria-colcount", String(columns.length - 1));
+  if (!textIndexReady) {
+    textVirtualRows.innerHTML = `<div class="text-workbook-empty"><strong>Preparing the row index...</strong><span>Your spreadsheet data is safe. The table will appear as soon as the queue restoration finishes.</span></div>`;
+    textVirtualSpacer.style.height = "160px";
+    return renderFilterSummary(0);
+  }
   if (!totalRows) {
     textVirtualRows.innerHTML = `<div class="text-workbook-empty"><strong>No rows match the current filters.</strong></div>`;
     textVirtualSpacer.style.height = "160px";
@@ -683,6 +748,10 @@ function renderFilterButtons() {
 }
 
 function renderFilterSummary(visibleTotal) {
+  if (!textIndexReady) {
+    textFilterSummaryLine.textContent = "Preparing the project row index without loading every record into the browser.";
+    return;
+  }
   const searchText = textSearchQuery.trim() ? ` matching "${textSearchQuery.trim()}"` : "";
   const filterText = activeStatusFilter === "all" ? "rows" : `${activeStatusFilter.replace("_", " ")} rows`;
   textFilterSummaryLine.textContent = `Showing ${Number(visibleTotal).toLocaleString()} ${filterText}${searchText}.`;
@@ -1011,6 +1080,14 @@ function formatBytes(size) {
   const kb = bytes / 1024;
   if (kb < 1024) return `${kb.toFixed(1)} KB`;
   return `${(kb / 1024).toFixed(1)} MB`;
+}
+
+function downloadSafeName(value) {
+  return String(value || "worksheet")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "worksheet";
 }
 
 function cssEscape(value) {

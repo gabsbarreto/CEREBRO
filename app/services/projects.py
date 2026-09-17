@@ -118,6 +118,15 @@ def migrate_legacy_jobs_if_needed() -> dict[str, Any]:
     if not legacy_jobs_dir.exists() or legacy_jobs_dir.resolve() == target_jobs_dir.resolve():
         return {"project": project, "copied": [], "skipped": []}
 
+    # A directory mtime changes when a new legacy job directory is added or
+    # removed. Store the last successfully inspected value so normal startup
+    # does not repeatedly walk every historical job in cloud-backed storage.
+    # Existing job content changes do not need another migration pass because
+    # the default project already owns that job directory.
+    source_mtime_ns = legacy_jobs_dir.stat().st_mtime_ns
+    if int(project.get("legacy_migration_source_mtime_ns") or -1) == source_mtime_ns:
+        return {"project": project, "copied": [], "skipped": []}
+
     copied: list[str] = []
     skipped: list[str] = []
     for source in sorted(legacy_jobs_dir.iterdir(), key=lambda item: item.name):
@@ -132,10 +141,14 @@ def migrate_legacy_jobs_if_needed() -> dict[str, Any]:
         shutil.copytree(source, destination)
         _stamp_project_id(destination, str(project["project_id"]))
         copied.append(source.name)
-    if copied:
+    if copied or int(project.get("legacy_migration_source_mtime_ns") or -1) != source_mtime_ns:
         project = dict(project)
-        project["legacy_migration_last_run_at"] = utc_now()
-        project["legacy_migrated_job_count"] = len(copied) + int(project.get("legacy_migrated_job_count") or 0)
+        now = utc_now()
+        project["legacy_migration_last_run_at"] = now
+        project["legacy_migration_checked_at"] = now
+        project["legacy_migration_source_mtime_ns"] = source_mtime_ns
+        if copied:
+            project["legacy_migrated_job_count"] = len(copied) + int(project.get("legacy_migrated_job_count") or 0)
         write_project_file(project_root(str(project["project_id"])) / "project.json", project)
     return {"project": project, "copied": copied, "skipped": skipped}
 

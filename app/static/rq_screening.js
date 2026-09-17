@@ -11,11 +11,17 @@ const metadataText = document.querySelector("#metadataText");
 const downloadLink = document.querySelector("#downloadLink");
 const copyButton = document.querySelector("#copyButton");
 const pdfInput = document.querySelector("#pdfInput");
+const supportingInput = document.querySelector("#supportingInput");
 const folderInput = document.querySelector("#folderInput");
 const chooseFilesButton = document.querySelector("#chooseFilesButton");
+const chooseSupportingFilesButton = document.querySelector("#chooseSupportingFilesButton");
 const chooseFolderButton = document.querySelector("#chooseFolderButton");
 const pdfInputSummary = document.querySelector("#pdfInputSummary");
+const supportingInputSummary = document.querySelector("#supportingInputSummary");
 const folderInputSummary = document.querySelector("#folderInputSummary");
+const studyBundleReview = document.querySelector("#studyBundleReview");
+const studyBundleSummary = document.querySelector("#studyBundleSummary");
+const studyBundleList = document.querySelector("#studyBundleList");
 const queuePanel = document.querySelector("#queuePanel");
 const queueList = document.querySelector("#queueList");
 const queueSummary = document.querySelector("#queueSummary");
@@ -81,6 +87,7 @@ let jobWindowRequestKey = "";
 let lastSuccessfulRefreshAt = null;
 let lastUpdatedTimer = null;
 let currentPollingCadence = "waiting for first update";
+let studyBundlePicker = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   initializeProjectSidebar();
@@ -88,6 +95,17 @@ document.addEventListener("DOMContentLoaded", () => {
   renderProjectChoices(initialProjects);
   loadProjectList();
   renderSelectedModelPreset();
+  studyBundlePicker = window.CEREBROStudyBundles?.mountStudyBundlePicker({
+    primaryInput: pdfInput,
+    supportingInput,
+    folderInput,
+    primarySummary: pdfInputSummary,
+    supportingSummary: supportingInputSummary,
+    folderSummary: folderInputSummary,
+    review: studyBundleReview,
+    reviewSummary: studyBundleSummary,
+    reviewList: studyBundleList,
+  });
   updateUploadSummaries();
   loadPromptTemplate();
   startLastUpdatedTimer();
@@ -100,12 +118,13 @@ chooseFilesButton.addEventListener("click", () => {
   pdfInput.click();
 });
 
+chooseSupportingFilesButton?.addEventListener("click", () => {
+  supportingInput?.click();
+});
+
 chooseFolderButton.addEventListener("click", () => {
   folderInput.click();
 });
-
-pdfInput.addEventListener("change", updateUploadSummaries);
-folderInput.addEventListener("change", updateUploadSummaries);
 
 savePromptButton.addEventListener("click", savePromptTemplate);
 loadSavedPromptButton.addEventListener("click", showSavedPromptPicker);
@@ -165,34 +184,35 @@ togglePdfSetupButton?.addEventListener("click", () => {
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const files = collectPdfFiles();
-  if (!files.length) {
-    setStatus("Choose one or more PDF files, or choose a folder containing PDFs.", 0, "failed");
+  const selection = studyBundlePicker?.getBundles();
+  if (!selection || selection.error) {
+    setStatus(selection?.error || "Could not prepare study bundles.", 0, "failed");
     return;
   }
+  const bundles = selection.bundles;
 
   runButton.disabled = true;
   resultPanel.classList.add("hidden");
   setStages("");
   try {
-    setStatus(`Checking ${files.length} PDF${files.length === 1 ? "" : "s"}`, 0.01, "running");
-    const check = await checkExistingUploads(files);
-    let filesToRun = files;
+    setStatus(`Checking ${bundles.length} study ${bundles.length === 1 ? "bundle" : "bundles"}`, 0.01, "running");
+    const check = await checkExistingUploads(bundles);
+    let bundlesToRun = bundles;
     let rerunExisting = false;
     if (check.duplicates?.length) {
       rerunExisting = await askOverwriteDuplicates(check.duplicates);
       if (!rerunExisting) {
-        const duplicateNames = new Set(check.duplicates.map((item) => item.filename));
-        filesToRun = files.filter((file) => !duplicateNames.has(displayUploadName(file)));
-        if (!filesToRun.length) {
-          setStatus("No new PDFs to queue.", 0, "queued");
+        const duplicateIndexes = new Set(check.duplicates.map((item) => Number(item.bundle_index)));
+        bundlesToRun = bundles.filter((_bundle, index) => !duplicateIndexes.has(index));
+        if (!bundlesToRun.length) {
+          setStatus("No new study bundles to queue.", 0, "queued");
           return;
         }
       }
     }
 
-    setStatus(`Uploading ${filesToRun.length} PDF${filesToRun.length === 1 ? "" : "s"}`, 0.02, "running");
-    const body = buildUploadFormData(filesToRun, rerunExisting);
+    setStatus(`Uploading ${bundlesToRun.length} study ${bundlesToRun.length === 1 ? "bundle" : "bundles"}`, 0.02, "running");
+    const body = buildUploadFormData(bundlesToRun, rerunExisting);
     const response = await fetch("/api/jobs", { method: "POST", body });
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
@@ -539,35 +559,13 @@ function setPromptStatus(message, status) {
   promptStatus.className = `prompt-status ${status || ""}`;
 }
 
-function collectPdfFiles() {
-  const byKey = new Map();
-  for (const file of [...pdfInput.files, ...folderInput.files]) {
-    if (!file.name.toLowerCase().endsWith(".pdf")) continue;
-    const key = `${file.webkitRelativePath || file.name}:${file.size}:${file.lastModified}`;
-    byKey.set(key, file);
-  }
-  return [...byKey.values()];
-}
-
 function updateUploadSummaries() {
-  pdfInputSummary.textContent = uploadSummary([...pdfInput.files], "No files selected", "file");
-  folderInputSummary.textContent = uploadSummary([...folderInput.files], "No folder selected", "folder file");
+  studyBundlePicker?.refresh();
 }
 
-function uploadSummary(files, emptyText, singularLabel) {
-  const pdfFiles = files.filter((file) => file.name.toLowerCase().endsWith(".pdf"));
-  if (!files.length) return emptyText;
-  if (!pdfFiles.length) return "No PDFs selected";
-  if (pdfFiles.length === 1) return pdfFiles[0].webkitRelativePath || pdfFiles[0].name;
-  return `${pdfFiles.length} ${singularLabel}${pdfFiles.length === 1 ? "" : "s"} selected`;
-}
-
-async function checkExistingUploads(files) {
+async function checkExistingUploads(bundles) {
   const body = new FormData();
-  for (const file of files) {
-    body.append("pdfs", file, displayUploadName(file));
-    body.append("pdf_relative_paths", uploadName(file));
-  }
+  studyBundlePicker.appendBundlesToFormData(body, bundles);
   appendSettings(body);
   const response = await fetch("/api/jobs/check-existing", { method: "POST", body });
   if (!response.ok) {
@@ -577,12 +575,9 @@ async function checkExistingUploads(files) {
   return response.json();
 }
 
-function buildUploadFormData(files, rerunExisting = false) {
+function buildUploadFormData(bundles, rerunExisting = false) {
   const body = new FormData();
-  for (const file of files) {
-    body.append("pdfs", file, displayUploadName(file));
-    body.append("pdf_relative_paths", uploadName(file));
-  }
+  studyBundlePicker.appendBundlesToFormData(body, bundles);
   body.append("rerun_existing", rerunExisting ? "true" : "false");
   appendSettings(body);
   return body;
@@ -614,9 +609,7 @@ function appendSettings(body) {
 }
 
 function clearFileInputs() {
-  pdfInput.value = "";
-  folderInput.value = "";
-  updateUploadSummaries();
+  studyBundlePicker?.clear();
 }
 
 function uploadName(file) {
@@ -636,8 +629,8 @@ function askOverwriteDuplicates(duplicates) {
   const names = duplicates.map((item) => `${item.filename} (${item.prompt_filename || "prompt not recorded"} | ${item.model || "model not recorded"})`).slice(0, 8);
   if (duplicates.length > names.length) names.push(`...and ${duplicates.length - names.length} more`);
   return CEREBROUI.confirm({
-    title: "Duplicate PDF decisions found",
-    message: "Overwrite matching decisions and reuse existing OCR where possible? Choose Cancel to queue only new PDFs.",
+    title: "Duplicate study decisions found",
+    message: "Overwrite matching study bundles and reuse existing source processing where possible? Choose Cancel to queue only new bundles.",
     details: names,
     confirmLabel: "Overwrite duplicates",
   });

@@ -28,9 +28,11 @@ class OpenAIInferenceJob:
     user_prompt_file: Path
     output_file: Path
     pdf_path: Path
+    source_file_paths: tuple[Path, ...] = ()
     project_id: str | None = None
     openai_input_mode: str = "ocr_text"
     openai_file_id: str = ""
+    openai_file_ids: tuple[str, ...] = ()
 
 
 OpenAIRunner = Callable[..., None]
@@ -179,17 +181,18 @@ class OpenAIInferenceQueue:
                 message = "OpenAI returned no final text"
                 progress = 0.94
             elif name == "openai_file_upload_started":
-                message = "Uploading PDF to OpenAI"
+                message = "Uploading source file to OpenAI"
                 progress = 0.76
             elif name in {"openai_file_uploaded", "openai_file_reused"}:
                 file_id = str(event.get("file_id") or "")
                 if file_id:
-                    jobs.update_metadata(
+                    jobs.record_openai_source_file(
                         jobs.job_dir(inference_job.job_id, inference_job.project_id),
-                        openai_file_id=file_id,
-                        openai_file_uploaded=name == "openai_file_uploaded",
+                        file_id=file_id,
+                        source_index=int(event.get("source_index") or 0),
+                        uploaded=name == "openai_file_uploaded",
                     )
-                message = "OpenAI PDF file ready"
+                message = "OpenAI source file ready"
                 progress = 0.80
             else:
                 message = "OpenAI inference running"
@@ -206,6 +209,9 @@ class OpenAIInferenceQueue:
 
         for attempt in range(self.max_retries + 1):
             try:
+                source_paths = inference_job.source_file_paths or (inference_job.pdf_path,)
+                file_ids = inference_job.openai_file_ids or ((inference_job.openai_file_id,) if inference_job.openai_file_id else ())
+                uses_bundle_inputs = inference_job.openai_input_mode == "pdf_file" and len(source_paths) > 1
                 self._runner(
                     job_id=inference_job.job_id,
                     model=inference_job.settings.rq_screening_model,
@@ -216,12 +222,14 @@ class OpenAIInferenceQueue:
                     enable_reasoning=inference_job.settings.rq_enable_thinking,
                     reasoning_effort=inference_job.settings.openai_reasoning_effort,
                     api_key=inference_job.settings.openai_api_key,
-                    input_file_id=inference_job.openai_file_id
+                    input_file_id=(file_ids[0] if file_ids and not uses_bundle_inputs else "")
                     if inference_job.openai_input_mode == "pdf_file"
                     else "",
-                    input_file_path=inference_job.pdf_path
-                    if inference_job.openai_input_mode == "pdf_file" and not inference_job.openai_file_id
+                    input_file_path=(source_paths[0] if not file_ids and not uses_bundle_inputs else None)
+                    if inference_job.openai_input_mode == "pdf_file"
                     else None,
+                    input_file_ids=list(file_ids) if uses_bundle_inputs else [],
+                    input_file_paths=list(source_paths) if uses_bundle_inputs and not file_ids else [],
                     on_event=handle_event,
                 )
                 self._completion_handler(

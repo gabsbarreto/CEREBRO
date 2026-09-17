@@ -17,14 +17,19 @@ from app.services import jobs, projects
 
 STRUCTURED_EXTRACTION_TYPE = "pdf_structured"
 STRUCTURED_SHEETS_DIRNAME = "structured_sheets"
+STRUCTURED_WORKBOOKS_DIRNAME = "structured_workbooks"
 SHEET_FILENAME = "sheet.json"
+WORKBOOK_FILENAME = "workbook.json"
 ROWS_JSONL_FILENAME = "rows.jsonl"
 ERRORS_JSONL_FILENAME = "errors.jsonl"
 RAW_OUTPUT_FILENAME = "structured_raw_response.tsv"
 PARSED_ROWS_FILENAME = "structured_parsed_rows.json"
 PARSE_ERRORS_FILENAME = "structured_parse_errors.json"
 STRUCTURED_EXPORT_SUFFIX = "structured_pdf_export.xlsx"
+STRUCTURED_WORKSHEET_EXPORT_SUFFIX = "structured_pdf_worksheet_export.xlsx"
+WORKBOOK_IMPORT_TEXT_SEPARATOR = "\n\n\n===== NEXT STRUCTURED SHEET =====\n\n\n"
 MAX_ROWS_LIMIT = 500
+DEFAULT_WORKBOOK_NAME = "Workbook 1"
 
 _BLOCK_SEPARATOR_RE = re.compile(r"(?m)^\s*---\s*$")
 _SECTION_RE = re.compile(r"(?m)^(Column name|Question|Rules)\s*###\s*(.*)$")
@@ -33,21 +38,111 @@ _SHEET_IMPORT_SECTION_RE = re.compile(
 )
 _SHEET_RECORD_LOCKS_GUARD = threading.Lock()
 _SHEET_RECORD_LOCKS: dict[str, threading.RLock] = {}
+_WORKBOOK_MIGRATION_LOCKS_GUARD = threading.Lock()
+_WORKBOOK_MIGRATION_LOCKS: dict[str, threading.RLock] = {}
 
 
 class StructuredParseError(ValueError):
     """Raised when model output cannot be parsed as the requested TSV schema."""
 
 
-def list_sheets(project_id: str) -> list[dict[str, Any]]:
+def list_workbooks(project_id: str) -> list[dict[str, Any]]:
+    """Return project workbooks in creation order, creating the legacy default when needed."""
+
     require_structured_project(project_id)
-    root = sheets_root(project_id)
-    sheets: list[dict[str, Any]] = []
-    for path in sorted(root.glob(f"*/{SHEET_FILENAME}"), key=lambda item: item.parent.name.lower()):
+    ensure_project_workbook_layout(project_id)
+    workbooks: list[dict[str, Any]] = []
+    for path in sorted(workbooks_root(project_id).glob(f"*/{WORKBOOK_FILENAME}"), key=lambda item: item.parent.name.lower()):
         try:
-            sheets.append(read_sheet_file(path))
+            workbooks.append(read_workbook_file(path))
         except Exception:
             continue
+    ensure_workbook_orders(project_id, workbooks)
+    ensure_unique_workbook_names(project_id, workbooks)
+    workbooks.sort(key=workbook_sort_key)
+    return workbooks
+
+
+def get_workbook(project_id: str, workbook_id: str) -> dict[str, Any]:
+    require_structured_project(project_id)
+    ensure_project_workbook_layout(project_id)
+    safe_workbook_id = validate_workbook_id(workbook_id)
+    path = workbook_root(project_id, safe_workbook_id) / WORKBOOK_FILENAME
+    if not path.exists():
+        raise FileNotFoundError(f"Structured workbook not found: {safe_workbook_id}")
+    return read_workbook_file(path)
+
+
+def get_default_workbook(project_id: str) -> dict[str, Any]:
+    workbooks = list_workbooks(project_id)
+    if not workbooks:
+        raise RuntimeError("Structured workbook migration did not create a default workbook.")
+    return workbooks[0]
+
+
+def create_workbook(*, project_id: str, name: str = "") -> dict[str, Any]:
+    require_structured_project(project_id)
+    ensure_project_workbook_layout(project_id)
+    existing = list_workbooks(project_id)
+    clean_name = str(name or "").strip() or next_workbook_name(existing)
+    existing_names = {str(workbook.get("name") or "").casefold() for workbook in existing}
+    if clean_name.casefold() in existing_names:
+        clean_name = next_duplicate_name(clean_name, {str(workbook.get("name") or "") for workbook in existing})
+    payload = normalized_workbook_payload(
+        project_id=project_id,
+        workbook_id=unique_workbook_id(project_id, clean_name),
+        name=clean_name,
+        created_at=utc_now(),
+        workbook_order=next_workbook_order(project_id),
+    )
+    root = workbook_root(project_id, str(payload["workbook_id"]))
+    root.mkdir(parents=True, exist_ok=True)
+    jobs.write_json(root / WORKBOOK_FILENAME, payload)
+    return read_workbook_file(root / WORKBOOK_FILENAME)
+
+
+def duplicate_project_workbook(project_id: str, workbook_id: str, name: str = "") -> dict[str, Any]:
+    """Duplicate schemas into another workbook in the same project, never rows or jobs."""
+
+    source = get_workbook(project_id, workbook_id)
+    duplicate = create_workbook(
+        project_id=project_id,
+        name=str(name or "").strip() or next_duplicate_name(
+            str(source.get("name") or "Workbook"),
+            {str(workbook.get("name") or "") for workbook in list_workbooks(project_id)},
+        ),
+    )
+    copied_sheets: list[dict[str, Any]] = []
+    for sheet in list_sheets(project_id, workbook_id=str(source["workbook_id"])):
+        copied_sheets.append(
+            create_sheet(
+                project_id=project_id,
+                workbook_id=str(duplicate["workbook_id"]),
+                name=str(sheet.get("name") or "Sheet"),
+                context=str(sheet.get("context") or ""),
+                row_unit=str(sheet.get("row_unit") or ""),
+                columns=[
+                    {
+                        "column_name": str(column.get("column_name") or ""),
+                        "question": str(column.get("question") or ""),
+                        "rules": str(column.get("rules") or ""),
+                    }
+                    for column in sheet.get("columns") or []
+                ],
+            )
+        )
+    return {"workbook": duplicate, "sheets": copied_sheets}
+
+
+def list_sheets(project_id: str, workbook_id: str = "") -> list[dict[str, Any]]:
+    require_structured_project(project_id)
+    ensure_project_workbook_layout(project_id)
+    selected_workbook_id = str(workbook_id or "").strip()
+    if selected_workbook_id:
+        selected_workbook_id = str(get_workbook(project_id, selected_workbook_id)["workbook_id"])
+    sheets = read_all_sheets(project_id)
+    if selected_workbook_id:
+        sheets = [sheet for sheet in sheets if str(sheet.get("workbook_id") or "") == selected_workbook_id]
     ensure_sheet_orders(project_id, sheets)
     ensure_unique_sheet_names(project_id, sheets)
     sheets.sort(key=sheet_sort_key)
@@ -57,21 +152,24 @@ def list_sheets(project_id: str) -> list[dict[str, Any]]:
 def create_sheet(
     *,
     project_id: str,
+    workbook_id: str = "",
     name: str,
     context: str = "",
     row_unit: str = "",
     columns: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     require_structured_project(project_id)
+    workbook = get_workbook(project_id, workbook_id) if workbook_id else get_default_workbook(project_id)
     payload = normalized_sheet_payload(
         project_id=project_id,
+        workbook_id=str(workbook["workbook_id"]),
         sheet_id=unique_sheet_id(project_id, name),
         name=name,
         context=context,
         row_unit=row_unit,
         columns=columns or [],
         created_at=utc_now(),
-        sheet_order=next_sheet_order(project_id),
+        sheet_order=next_sheet_order(project_id, str(workbook["workbook_id"])),
     )
     root = sheet_root(project_id, str(payload["sheet_id"]))
     root.mkdir(parents=True, exist_ok=True)
@@ -84,15 +182,17 @@ def update_sheet(
     *,
     project_id: str,
     sheet_id: str,
+    workbook_id: str = "",
     name: str,
     context: str = "",
     row_unit: str = "",
     columns: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    existing = get_sheet(project_id, sheet_id)
+    existing = get_sheet(project_id, sheet_id, workbook_id=workbook_id)
     ensure_sheet_editable(existing)
     payload = normalized_sheet_payload(
         project_id=project_id,
+        workbook_id=str(existing.get("workbook_id") or ""),
         sheet_id=sheet_id,
         name=name,
         context=context,
@@ -105,13 +205,15 @@ def update_sheet(
     return read_sheet_file(sheet_root(project_id, sheet_id) / SHEET_FILENAME)
 
 
-def duplicate_sheet(project_id: str, sheet_id: str) -> dict[str, Any]:
-    existing = get_sheet(project_id, sheet_id)
+def duplicate_sheet(project_id: str, sheet_id: str, workbook_id: str = "") -> dict[str, Any]:
+    existing = get_sheet(project_id, sheet_id, workbook_id=workbook_id)
+    source_workbook_id = str(existing.get("workbook_id") or "")
     duplicate_order = sheet_order(existing) + 1
-    shift_sheet_orders(project_id, start_order=duplicate_order)
-    duplicate_name = unique_duplicate_sheet_name(project_id, str(existing.get("name") or "Sheet"))
+    shift_sheet_orders(project_id, workbook_id=source_workbook_id, start_order=duplicate_order)
+    duplicate_name = unique_duplicate_sheet_name(project_id, str(existing.get("name") or "Sheet"), source_workbook_id)
     payload = normalized_sheet_payload(
         project_id=project_id,
+        workbook_id=source_workbook_id,
         sheet_id=unique_sheet_id(project_id, duplicate_name),
         name=duplicate_name,
         context=str(existing.get("context") or ""),
@@ -179,20 +281,25 @@ def duplicate_workbook(project_id: str, sheet_ids: list[str]) -> dict[str, Any]:
     }
 
 
-def delete_sheet(project_id: str, sheet_id: str) -> None:
-    get_sheet(project_id, sheet_id)
+def delete_sheet(project_id: str, sheet_id: str, workbook_id: str = "") -> None:
+    get_sheet(project_id, sheet_id, workbook_id=workbook_id)
     root = sheet_root(project_id, sheet_id)
     if root.exists():
         shutil.rmtree(root)
 
 
-def get_sheet(project_id: str, sheet_id: str) -> dict[str, Any]:
+def get_sheet(project_id: str, sheet_id: str, workbook_id: str = "") -> dict[str, Any]:
     require_structured_project(project_id)
+    ensure_project_workbook_layout(project_id)
     safe_sheet_id = validate_sheet_id(sheet_id)
     path = sheet_root(project_id, safe_sheet_id) / SHEET_FILENAME
     if not path.exists():
         raise FileNotFoundError(f"Structured sheet not found: {safe_sheet_id}")
-    return read_sheet_file(path)
+    sheet = read_sheet_file(path)
+    requested_workbook_id = str(workbook_id or "").strip()
+    if requested_workbook_id and str(sheet.get("workbook_id") or "") != validate_workbook_id(requested_workbook_id):
+        raise ValueError("Structured sheet does not belong to the selected workbook.")
+    return sheet
 
 
 def parse_column_blocks(raw_text: str) -> list[dict[str, str]]:
@@ -273,6 +380,14 @@ def format_sheet_import_text(sheet: dict[str, Any]) -> str:
         ).rstrip()
         + "\n"
     )
+
+
+def format_workbook_import_text(sheets: list[dict[str, Any]]) -> str:
+    """Serialize editable sheet definitions without compiled extraction instructions."""
+    if not sheets:
+        raise ValueError("No structured sheets are available to export.")
+    blocks = [format_sheet_import_text(sheet).rstrip() for sheet in sheets]
+    return WORKBOOK_IMPORT_TEXT_SEPARATOR.join(blocks) + "\n"
 
 
 def parse_sheet_import_fields(text: str) -> tuple[dict[str, str], str]:
@@ -442,6 +557,7 @@ def complete_structured_job(
     metadata = jobs.read_metadata(root)
     sheet_id = str(metadata.get("structured_sheet_id") or "")
     sheet = get_sheet(project_id, sheet_id)
+    workbook_id = str(sheet.get("workbook_id") or metadata.get("structured_workbook_id") or "")
     columns = [
         column["column_name"]
         for column in normalize_columns(
@@ -465,6 +581,7 @@ def complete_structured_job(
             row_records.append(
                 structured_row_record(
                     project_id=project_id,
+                    workbook_id=workbook_id,
                     sheet_id=sheet_id,
                     job_id=job_id,
                     metadata=metadata,
@@ -480,6 +597,7 @@ def complete_structured_job(
         error_records.append(
             structured_error_record(
                 project_id=project_id,
+                workbook_id=workbook_id,
                 sheet_id=sheet_id,
                 job_id=job_id,
                 metadata=metadata,
@@ -517,6 +635,7 @@ def complete_structured_job(
         structured_parse_status=parse_status,
         structured_parse_error=parse_error,
         structured_parsed_row_count=len(row_records),
+        structured_workbook_id=workbook_id,
     )
     message = (
         f"Structured extraction parsed {len(row_records)} row{'' if len(row_records) == 1 else 's'}"
@@ -540,26 +659,35 @@ def complete_structured_job(
     )
 
 
-def list_structured_jobs(project_id: str) -> list[dict[str, Any]]:
+def list_structured_jobs(project_id: str, workbook_id: str = "") -> list[dict[str, Any]]:
     require_structured_project(project_id)
     records = [
         record
         for record in jobs.list_jobs(limit=0, project_id=project_id)
         if (record.get("metadata") or {}).get("extraction_type") == STRUCTURED_EXTRACTION_TYPE
     ]
+    selected_workbook_id = str(workbook_id or "").strip()
+    if selected_workbook_id:
+        selected_workbook_id = str(get_workbook(project_id, selected_workbook_id)["workbook_id"])
+        records = [
+            record
+            for record in records
+            if structured_job_workbook_id(project_id, record) == selected_workbook_id
+        ]
     return records
 
 
 def list_structured_jobs_window(
     project_id: str,
     *,
+    workbook_id: str = "",
     sheet_id: str = "",
     offset: int = 0,
     limit: int = 80,
     status: str = "all",
     search: str = "",
 ) -> dict[str, Any]:
-    records = list_structured_jobs(project_id)
+    records = list_structured_jobs(project_id, workbook_id=workbook_id)
     selected_sheet_id = str(sheet_id or "").strip()
     if selected_sheet_id:
         validate_sheet_id(selected_sheet_id)
@@ -627,6 +755,20 @@ def structured_job_search_haystack(record: dict[str, Any]) -> str:
     return " ".join(str(value or "") for value in values).lower()
 
 
+def structured_job_workbook_id(project_id: str, record: dict[str, Any]) -> str:
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    saved = str(metadata.get("structured_workbook_id") or "").strip()
+    if saved:
+        return saved
+    sheet_id = str(metadata.get("structured_sheet_id") or "").strip()
+    if not sheet_id:
+        return ""
+    try:
+        return str(get_sheet(project_id, sheet_id).get("workbook_id") or "")
+    except (FileNotFoundError, ValueError):
+        return ""
+
+
 def lock_sheet_for_first_run(project_id: str, sheet_id: str, job_id: str) -> dict[str, Any]:
     sheet = get_sheet(project_id, sheet_id)
     if sheet_is_locked(sheet):
@@ -641,7 +783,7 @@ def lock_sheet_for_first_run(project_id: str, sheet_id: str, job_id: str) -> dic
     return read_sheet_file(sheet_root(project_id, sheet_id) / SHEET_FILENAME)
 
 
-def structured_job_result(project_id: str, job_id: str) -> dict[str, Any]:
+def structured_job_result(project_id: str, job_id: str, workbook_id: str = "") -> dict[str, Any]:
     require_structured_project(project_id)
     root = jobs.job_dir(job_id, project_id)
     if not root.exists():
@@ -649,6 +791,8 @@ def structured_job_result(project_id: str, job_id: str) -> dict[str, Any]:
     metadata = jobs.read_metadata(root)
     if metadata.get("extraction_type") != STRUCTURED_EXTRACTION_TYPE:
         raise ValueError("Job is not a structured PDF extraction job.")
+    if workbook_id and structured_job_workbook_id(project_id, {"metadata": metadata}) != validate_workbook_id(workbook_id):
+        raise ValueError("Structured job does not belong to the selected workbook.")
     return {
         "status": jobs.read_status(job_id, project_id=project_id),
         "metadata": metadata,
@@ -666,16 +810,17 @@ def list_rows(
     *,
     project_id: str,
     sheet_id: str,
+    workbook_id: str = "",
     offset: int = 0,
     limit: int = 100,
     search: str = "",
 ) -> dict[str, Any]:
-    sheet = get_sheet(project_id, sheet_id)
+    sheet = get_sheet(project_id, sheet_id, workbook_id=workbook_id)
     query = str(search or "").strip().lower()
     sheet_records = read_sheet_rows(project_id, sheet_id) + read_sheet_errors(project_id, sheet_id)
     structured_jobs = [
         record
-        for record in list_structured_jobs(project_id)
+        for record in list_structured_jobs(project_id, workbook_id=str(sheet.get("workbook_id") or ""))
         if str((record.get("metadata") or {}).get("structured_sheet_id") or "") == str(sheet_id)
     ]
     jobs_by_id = {str(record.get("job_id") or ""): record for record in structured_jobs}
@@ -746,9 +891,10 @@ def structured_job_row_record(project_id: str, sheet_id: str, job_record: dict[s
     }
 
 
-def export_structured_workbook(project_id: str) -> Path:
+def export_structured_workbook(project_id: str, workbook_id: str = "") -> Path:
     project = require_structured_project(project_id)
-    sheets = list_sheets(project_id)
+    selected_workbook = get_workbook(project_id, workbook_id) if workbook_id else get_default_workbook(project_id)
+    sheets = list_sheets(project_id, workbook_id=str(selected_workbook["workbook_id"]))
     workbook = Workbook()
     default = workbook.active
     workbook.remove(default)
@@ -757,31 +903,65 @@ def export_structured_workbook(project_id: str) -> Path:
         worksheet = workbook.create_sheet("Structured export")
         worksheet.append(["No structured sheets found"])
     for sheet in sheets:
-        worksheet = workbook.create_sheet(safe_worksheet_name(str(sheet.get("name") or "Sheet"), used_names))
-        columns = [column["column_name"] for column in normalize_columns(sheet.get("columns") or [], require_questions=False)]
-        headers = [
-            excel_safe_text(header)
-            for header in ["source_pdf", "job_id", "extracted_at", "model", "parse_status", "parse_date", "parse_error"] + columns
-        ]
-        worksheet.append(headers)
-        for record in read_sheet_rows(project_id, str(sheet["sheet_id"])) + read_sheet_errors(project_id, str(sheet["sheet_id"])):
-            cells = record.get("cells") if isinstance(record.get("cells"), dict) else {}
-            worksheet.append(
-                [
-                    excel_safe_text(record.get("source_pdf")),
-                    excel_safe_text(record.get("job_id")),
-                    excel_safe_text(record.get("extracted_at")),
-                    excel_safe_text(record.get("model")),
-                    excel_safe_text(record.get("parse_status")),
-                    excel_safe_text(record.get("parse_date") or record.get("extracted_at")),
-                    excel_safe_text(record.get("parse_error")),
-                ]
-                + [excel_safe_text(cells.get(column)) for column in columns]
-            )
-        for column in worksheet.columns:
-            letter = column[0].column_letter
-            worksheet.column_dimensions[letter].width = min(max(len(str(column[0].value or "")) + 4, 14), 60)
-    path = projects.project_root(project_id) / f"cerebro_{projects.sanitize_slug(str(project.get('name') or project_id))}_{STRUCTURED_EXPORT_SUFFIX}"
+        append_structured_worksheet(workbook, project_id, sheet, used_names)
+    project_slug = projects.sanitize_slug(str(project.get("name") or project_id))
+    if workbook_id:
+        workbook_slug = projects.sanitize_slug(str(selected_workbook.get("name") or selected_workbook["workbook_id"]))
+        filename = f"cerebro_{project_slug}_{workbook_slug}_{STRUCTURED_EXPORT_SUFFIX}"
+    else:
+        filename = f"cerebro_{project_slug}_{STRUCTURED_EXPORT_SUFFIX}"
+    path = projects.project_root(project_id) / filename
+    save_workbook_atomically(workbook, path)
+    return path
+
+
+def export_structured_worksheet(project_id: str, sheet_id: str, workbook_id: str = "") -> Path:
+    project = require_structured_project(project_id)
+    sheet = get_sheet(project_id, sheet_id, workbook_id=workbook_id)
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    append_structured_worksheet(workbook, project_id, sheet, set())
+    project_slug = projects.sanitize_slug(str(project.get("name") or project_id))
+    sheet_slug = projects.sanitize_slug(str(sheet.get("name") or sheet_id))
+    path = projects.project_root(project_id) / f"cerebro_{project_slug}_{sheet_slug}_{STRUCTURED_WORKSHEET_EXPORT_SUFFIX}"
+    save_workbook_atomically(workbook, path)
+    return path
+
+
+def append_structured_worksheet(
+    workbook: Workbook,
+    project_id: str,
+    sheet: dict[str, Any],
+    used_names: set[str],
+) -> None:
+    worksheet = workbook.create_sheet(safe_worksheet_name(str(sheet.get("name") or "Sheet"), used_names))
+    columns = [column["column_name"] for column in normalize_columns(sheet.get("columns") or [], require_questions=False)]
+    headers = [
+        excel_safe_text(header)
+        for header in ["source_pdf", "job_id", "extracted_at", "model", "parse_status", "parse_date", "parse_error"] + columns
+    ]
+    worksheet.append(headers)
+    records = read_sheet_rows(project_id, str(sheet["sheet_id"])) + read_sheet_errors(project_id, str(sheet["sheet_id"]))
+    for record in records:
+        cells = record.get("cells") if isinstance(record.get("cells"), dict) else {}
+        worksheet.append(
+            [
+                excel_safe_text(record.get("source_pdf")),
+                excel_safe_text(record.get("job_id")),
+                excel_safe_text(record.get("extracted_at")),
+                excel_safe_text(record.get("model")),
+                excel_safe_text(record.get("parse_status")),
+                excel_safe_text(record.get("parse_date") or record.get("extracted_at")),
+                excel_safe_text(record.get("parse_error")),
+            ]
+            + [excel_safe_text(cells.get(column)) for column in columns]
+        )
+    for column in worksheet.columns:
+        letter = column[0].column_letter
+        worksheet.column_dimensions[letter].width = min(max(len(str(column[0].value or "")) + 4, 14), 60)
+
+
+def save_workbook_atomically(workbook: Workbook, path: Path) -> None:
     tmp_path = path.with_name(f".{path.name}.tmp")
     try:
         workbook.save(tmp_path)
@@ -789,7 +969,6 @@ def export_structured_workbook(project_id: str) -> Path:
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
-    return path
 
 
 def require_structured_project(project_id: str) -> dict[str, Any]:
@@ -797,6 +976,199 @@ def require_structured_project(project_id: str) -> dict[str, Any]:
     if projects.normalize_extraction_type(project.get("extraction_type")) != STRUCTURED_EXTRACTION_TYPE:
         raise ValueError("Project is not a structured PDF extraction project.")
     return project
+
+
+def workbooks_root(project_id: str) -> Path:
+    projects.validate_project_id(project_id)
+    return projects.project_root(project_id) / STRUCTURED_WORKBOOKS_DIRNAME
+
+
+def workbook_root(project_id: str, workbook_id: str) -> Path:
+    return workbooks_root(project_id) / validate_workbook_id(workbook_id)
+
+
+def validate_workbook_id(workbook_id: str) -> str:
+    safe_id = str(workbook_id or "").strip()
+    if not safe_id:
+        raise ValueError("Workbook id is required.")
+    projects.validate_project_id(safe_id)
+    return safe_id
+
+
+def unique_workbook_id(project_id: str, name: str) -> str:
+    stem = projects.sanitize_slug(name or "workbook")
+    for _attempt in range(20):
+        candidate = f"{stem}-{uuid.uuid4().hex[:8]}"
+        if not workbook_root(project_id, candidate).exists():
+            return candidate
+    return uuid.uuid4().hex
+
+
+def ensure_project_workbook_layout(project_id: str) -> None:
+    """Add workbook ownership to legacy sheets without moving their data folders."""
+
+    require_structured_project(project_id)
+    with workbook_migration_lock(project_id):
+        root = workbooks_root(project_id)
+        root.mkdir(parents=True, exist_ok=True)
+        workbook_paths = list(root.glob(f"*/{WORKBOOK_FILENAME}"))
+        workbooks: list[dict[str, Any]] = []
+        for path in workbook_paths:
+            try:
+                workbooks.append(read_workbook_file(path))
+            except Exception:
+                continue
+        if not workbooks:
+            now = utc_now()
+            payload = normalized_workbook_payload(
+                project_id=project_id,
+                workbook_id=unique_workbook_id(project_id, DEFAULT_WORKBOOK_NAME),
+                name=DEFAULT_WORKBOOK_NAME,
+                created_at=now,
+                workbook_order=0,
+            )
+            destination = workbook_root(project_id, str(payload["workbook_id"]))
+            destination.mkdir(parents=True, exist_ok=True)
+            jobs.write_json(destination / WORKBOOK_FILENAME, payload)
+            workbooks = [payload]
+        ensure_workbook_orders(project_id, workbooks)
+        workbooks.sort(key=workbook_sort_key)
+        known_ids = {str(workbook["workbook_id"]) for workbook in workbooks}
+        default_workbook_id = str(workbooks[0]["workbook_id"])
+        for sheet in read_all_sheets(project_id):
+            sheet_workbook_id = str(sheet.get("workbook_id") or "").strip()
+            if sheet_workbook_id in known_ids:
+                continue
+            sheet["workbook_id"] = default_workbook_id
+            jobs.write_json(sheet_root(project_id, str(sheet["sheet_id"])) / SHEET_FILENAME, serialized_sheet_payload(sheet))
+        all_sheets = read_all_sheets(project_id)
+        ensure_sheet_orders(project_id, all_sheets)
+        ensure_unique_sheet_names(project_id, all_sheets)
+
+
+def workbook_migration_lock(project_id: str) -> threading.RLock:
+    key = str(projects.project_root(project_id).resolve())
+    with _WORKBOOK_MIGRATION_LOCKS_GUARD:
+        lock = _WORKBOOK_MIGRATION_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _WORKBOOK_MIGRATION_LOCKS[key] = lock
+        return lock
+
+
+def read_all_sheets(project_id: str) -> list[dict[str, Any]]:
+    root = sheets_root(project_id)
+    sheets: list[dict[str, Any]] = []
+    for path in sorted(root.glob(f"*/{SHEET_FILENAME}"), key=lambda item: item.parent.name.lower()):
+        try:
+            sheets.append(read_sheet_file(path))
+        except Exception:
+            continue
+    return sheets
+
+
+def read_workbook_file(path: Path) -> dict[str, Any]:
+    payload = jobs.read_json(path)
+    project_id = projects.validate_project_id(str(payload.get("project_id") or path.parents[2].name))
+    payload["workbook_id"] = validate_workbook_id(str(payload.get("workbook_id") or path.parent.name))
+    payload["project_id"] = project_id
+    payload["name"] = str(payload.get("name") or "Workbook").strip() or "Workbook"
+    payload.setdefault("workbook_order", 1_000_000)
+    payload.setdefault("created_at", "")
+    payload.setdefault("updated_at", "")
+    return payload
+
+
+def normalized_workbook_payload(
+    *,
+    project_id: str,
+    workbook_id: str,
+    name: str,
+    created_at: str,
+    workbook_order: int,
+) -> dict[str, Any]:
+    clean_name = str(name or "").strip()
+    if not clean_name:
+        raise ValueError("Workbook name is required.")
+    now = utc_now()
+    return {
+        "workbook_id": validate_workbook_id(workbook_id),
+        "project_id": projects.validate_project_id(project_id),
+        "name": clean_name,
+        "workbook_order": int(workbook_order),
+        "created_at": created_at or now,
+        "updated_at": now,
+    }
+
+
+def workbook_sort_key(workbook: dict[str, Any]) -> tuple[int, str, str]:
+    try:
+        order = int(workbook.get("workbook_order"))
+    except (TypeError, ValueError):
+        order = 1_000_000
+    return (order, str(workbook.get("created_at") or ""), str(workbook.get("workbook_id") or ""))
+
+
+def ensure_workbook_orders(project_id: str, workbooks: list[dict[str, Any]]) -> None:
+    if not any(workbook_sort_key(workbook)[0] >= 1_000_000 for workbook in workbooks):
+        return
+    ordered = sorted(workbooks, key=lambda workbook: (str(workbook.get("created_at") or ""), str(workbook.get("workbook_id") or "")))
+    for index, workbook in enumerate(ordered):
+        if workbook_sort_key(workbook)[0] == index:
+            continue
+        workbook["workbook_order"] = index
+        jobs.write_json(
+            workbook_root(project_id, str(workbook["workbook_id"])) / WORKBOOK_FILENAME,
+            normalized_workbook_payload(
+                project_id=project_id,
+                workbook_id=str(workbook["workbook_id"]),
+                name=str(workbook.get("name") or "Workbook"),
+                created_at=str(workbook.get("created_at") or ""),
+                workbook_order=index,
+            ),
+        )
+
+
+def ensure_unique_workbook_names(project_id: str, workbooks: list[dict[str, Any]]) -> None:
+    used_names: set[str] = set()
+    for workbook in sorted(workbooks, key=workbook_sort_key):
+        name = str(workbook.get("name") or "Workbook").strip() or "Workbook"
+        if name not in used_names:
+            if workbook.get("name") != name:
+                workbook["name"] = name
+                write_workbook(project_id, workbook)
+            used_names.add(name)
+            continue
+        workbook["name"] = next_duplicate_name(duplicate_base_name(name), used_names)
+        used_names.add(str(workbook["name"]))
+        write_workbook(project_id, workbook)
+
+
+def write_workbook(project_id: str, workbook: dict[str, Any]) -> None:
+    jobs.write_json(
+        workbook_root(project_id, str(workbook["workbook_id"])) / WORKBOOK_FILENAME,
+        normalized_workbook_payload(
+            project_id=project_id,
+            workbook_id=str(workbook["workbook_id"]),
+            name=str(workbook.get("name") or "Workbook"),
+            created_at=str(workbook.get("created_at") or ""),
+            workbook_order=workbook_sort_key(workbook)[0],
+        ),
+    )
+
+
+def next_workbook_order(project_id: str) -> int:
+    orders = [workbook_sort_key(workbook)[0] for workbook in list_workbooks(project_id)]
+    real_orders = [order for order in orders if order < 1_000_000]
+    return max(real_orders) + 1 if real_orders else len(orders)
+
+
+def next_workbook_name(workbooks: list[dict[str, Any]]) -> str:
+    names = {str(workbook.get("name") or "") for workbook in workbooks}
+    index = 1
+    while f"Workbook {index}" in names:
+        index += 1
+    return f"Workbook {index}"
 
 
 def sheets_root(project_id: str) -> Path:
@@ -825,8 +1197,8 @@ def unique_sheet_id(project_id: str, name: str) -> str:
     return uuid.uuid4().hex
 
 
-def unique_duplicate_sheet_name(project_id: str, name: str) -> str:
-    existing = {str(sheet.get("name") or "") for sheet in list_sheets(project_id)}
+def unique_duplicate_sheet_name(project_id: str, name: str, workbook_id: str = "") -> str:
+    existing = {str(sheet.get("name") or "") for sheet in list_sheets(project_id, workbook_id=workbook_id)}
     base = duplicate_base_name(name)
     return next_duplicate_name(base, existing)
 
@@ -864,43 +1236,51 @@ def sheet_order(sheet: dict[str, Any]) -> int:
 
 
 def ensure_sheet_orders(project_id: str, sheets: list[dict[str, Any]]) -> None:
-    if not any(sheet_order(sheet) >= 1_000_000 for sheet in sheets):
-        return
-    ordered = sorted(sheets, key=lambda sheet: (str(sheet.get("created_at") or ""), str(sheet.get("sheet_id") or "")))
-    for index, sheet in enumerate(ordered):
-        if sheet_order(sheet) == index:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for sheet in sheets:
+        groups.setdefault(str(sheet.get("workbook_id") or ""), []).append(sheet)
+    for group in groups.values():
+        if not any(sheet_order(sheet) >= 1_000_000 for sheet in group):
             continue
-        sheet["sheet_order"] = index
-        jobs.write_json(sheet_root(project_id, str(sheet["sheet_id"])) / SHEET_FILENAME, serialized_sheet_payload(sheet))
+        ordered = sorted(group, key=lambda sheet: (str(sheet.get("created_at") or ""), str(sheet.get("sheet_id") or "")))
+        for index, sheet in enumerate(ordered):
+            if sheet_order(sheet) == index:
+                continue
+            sheet["sheet_order"] = index
+            jobs.write_json(sheet_root(project_id, str(sheet["sheet_id"])) / SHEET_FILENAME, serialized_sheet_payload(sheet))
 
 
 def ensure_unique_sheet_names(project_id: str, sheets: list[dict[str, Any]]) -> None:
-    used_names: set[str] = set()
-    for sheet in sorted(sheets, key=sheet_sort_key):
-        name = str(sheet.get("name") or "Sheet").strip() or "Sheet"
-        if name not in used_names:
-            if sheet.get("name") != name:
-                sheet["name"] = name
-                jobs.write_json(sheet_root(project_id, str(sheet["sheet_id"])) / SHEET_FILENAME, serialized_sheet_payload(sheet))
-            used_names.add(name)
-            continue
-        base = duplicate_base_name(name)
-        candidate = next_duplicate_name(base, used_names)
-        sheet["name"] = candidate
-        used_names.add(candidate)
-        jobs.write_json(sheet_root(project_id, str(sheet["sheet_id"])) / SHEET_FILENAME, serialized_sheet_payload(sheet))
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for sheet in sheets:
+        groups.setdefault(str(sheet.get("workbook_id") or ""), []).append(sheet)
+    for group in groups.values():
+        used_names: set[str] = set()
+        for sheet in sorted(group, key=sheet_sort_key):
+            name = str(sheet.get("name") or "Sheet").strip() or "Sheet"
+            if name not in used_names:
+                if sheet.get("name") != name:
+                    sheet["name"] = name
+                    jobs.write_json(sheet_root(project_id, str(sheet["sheet_id"])) / SHEET_FILENAME, serialized_sheet_payload(sheet))
+                used_names.add(name)
+                continue
+            base = duplicate_base_name(name)
+            candidate = next_duplicate_name(base, used_names)
+            sheet["name"] = candidate
+            used_names.add(candidate)
+            jobs.write_json(sheet_root(project_id, str(sheet["sheet_id"])) / SHEET_FILENAME, serialized_sheet_payload(sheet))
 
 
-def next_sheet_order(project_id: str) -> int:
-    orders = [sheet_order(sheet) for sheet in list_sheets(project_id)]
+def next_sheet_order(project_id: str, workbook_id: str = "") -> int:
+    orders = [sheet_order(sheet) for sheet in list_sheets(project_id, workbook_id=workbook_id)]
     real_orders = [order for order in orders if order < 1_000_000]
     if real_orders:
         return max(real_orders) + 1
     return len(orders)
 
 
-def shift_sheet_orders(project_id: str, *, start_order: int) -> None:
-    for sheet in reversed(list_sheets(project_id)):
+def shift_sheet_orders(project_id: str, *, workbook_id: str = "", start_order: int) -> None:
+    for sheet in reversed(list_sheets(project_id, workbook_id=workbook_id)):
         order = sheet_order(sheet)
         if order >= start_order:
             sheet["sheet_order"] = order + 1
@@ -911,6 +1291,7 @@ def serialized_sheet_payload(sheet: dict[str, Any]) -> dict[str, Any]:
     payload = {
         "sheet_id": validate_sheet_id(str(sheet.get("sheet_id") or "")),
         "project_id": projects.validate_project_id(str(sheet.get("project_id") or "")),
+        "workbook_id": validate_workbook_id(str(sheet.get("workbook_id") or "")),
         "name": str(sheet.get("name") or "Sheet"),
         "context": str(sheet.get("context") or ""),
         "row_unit": str(sheet.get("row_unit") or ""),
@@ -928,6 +1309,7 @@ def serialized_sheet_payload(sheet: dict[str, Any]) -> dict[str, Any]:
 def normalized_sheet_payload(
     *,
     project_id: str,
+    workbook_id: str,
     sheet_id: str,
     name: str,
     context: str,
@@ -944,6 +1326,7 @@ def normalized_sheet_payload(
     return {
         "sheet_id": validate_sheet_id(sheet_id),
         "project_id": projects.validate_project_id(project_id),
+        "workbook_id": validate_workbook_id(workbook_id),
         "name": clean_name,
         "context": str(context or "").strip(),
         "row_unit": str(row_unit or "").strip(),
@@ -983,6 +1366,7 @@ def read_sheet_file(path: Path) -> dict[str, Any]:
     payload = jobs.read_json(path)
     payload["sheet_id"] = validate_sheet_id(str(payload.get("sheet_id") or path.parent.name))
     payload["project_id"] = projects.validate_project_id(str(payload.get("project_id") or path.parents[2].name))
+    payload.setdefault("workbook_id", "")
     payload["columns"] = normalize_columns(payload.get("columns") or [], require_questions=False)
     payload.setdefault("context", "")
     payload.setdefault("row_unit", "")
@@ -1046,6 +1430,7 @@ def strip_surrounding_code_fence(text: str) -> str:
 def structured_row_record(
     *,
     project_id: str,
+    workbook_id: str,
     sheet_id: str,
     job_id: str,
     metadata: dict[str, Any],
@@ -1058,6 +1443,7 @@ def structured_row_record(
         "row_id": uuid.uuid4().hex,
         "sheet_id": sheet_id,
         "project_id": project_id,
+        "workbook_id": workbook_id,
         "job_id": job_id,
         "source_pdf": str(metadata.get("original_filename") or ""),
         "source_relative_path": str(metadata.get("source_relative_path") or ""),
@@ -1074,6 +1460,7 @@ def structured_row_record(
 def structured_error_record(
     *,
     project_id: str,
+    workbook_id: str,
     sheet_id: str,
     job_id: str,
     metadata: dict[str, Any],
@@ -1087,6 +1474,7 @@ def structured_error_record(
         "error_id": uuid.uuid4().hex,
         "sheet_id": sheet_id,
         "project_id": project_id,
+        "workbook_id": workbook_id,
         "job_id": job_id,
         "source_pdf": str(metadata.get("original_filename") or ""),
         "source_relative_path": str(metadata.get("source_relative_path") or ""),

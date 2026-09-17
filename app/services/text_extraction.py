@@ -12,13 +12,13 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from openpyxl import Workbook, load_workbook
 
 from app import config
 from app.models import JobSettings, normalize_selectable_model_preset
-from app.services import jobs, projects
+from app.services import jobs, projects, text_index
 from app.services.openai_rq import run_openai_rq
 from app.services.rq_llm import run_rq_llm
 from app.services.rq_prompt import build_prompt_transcript, read_prompt_file
@@ -30,6 +30,7 @@ SOURCE_FILES_DIRNAME = "source_files"
 ROWS_JSONL_FILENAME = "rows.jsonl"
 SOURCE_MANIFEST_FILENAME = "source.json"
 TEXT_EXPORT_SUFFIX = "text_extraction_export.xlsx"
+TEXT_WORKSHEET_EXPORT_SUFFIX = "text_extraction_worksheet_export.xlsx"
 TEXT_JOB_OUTPUT = "output.md"
 TEXT_SHEETS_DIRNAME = "text_sheets"
 TEXT_SHEET_FILENAME = "sheet.json"
@@ -37,6 +38,7 @@ TEXT_WORKBOOK_FILENAME = "text_workbook.json"
 VISIBLE_RESULT_PREVIEW_CHARS = 220
 CSV_FIELD_LIMIT = 1024 * 1024 * 32
 MAX_LOCAL_TEXT_CONCURRENT_JOBS = 4
+QUEUE_STATUS_ID_PREVIEW_LIMIT = 24
 _TEXT_SHEET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _LOCAL_TEXT_INFERENCE_SEMAPHORE = threading.BoundedSemaphore(MAX_LOCAL_TEXT_CONCURRENT_JOBS)
 
@@ -57,6 +59,7 @@ class TextJobQueue:
         self._pending: deque[TextQueuedJob] = deque()
         self._queued_or_running: set[str] = set()
         self._current: dict[str, TextQueuedJob] = {}
+        self._restore_states: dict[str, dict[str, Any]] = {}
         self._paused = False
         self._condition = threading.Condition()
         worker_count = max(1, config.MAX_OPENAI_CONCURRENT_REQUESTS)
@@ -71,7 +74,14 @@ class TextJobQueue:
         for worker in self._workers:
             worker.start()
 
-    def enqueue(self, project_id: str, job_id: str, *, front: bool = False) -> bool:
+    def enqueue(
+        self,
+        project_id: str,
+        job_id: str,
+        *,
+        front: bool = False,
+        persist_status: bool = True,
+    ) -> bool:
         key = queue_key(project_id, job_id)
         with self._condition:
             if key in self._queued_or_running:
@@ -83,16 +93,17 @@ class TextJobQueue:
             else:
                 self._pending.append(queued)
             self._condition.notify_all()
-        jobs.update_status(
-            job_id,
-            status="queued",
-            stage="queued",
-            message="Queued",
-            progress=0.0,
-            error=None,
-            event={"event": "queued"},
-            project_id=project_id,
-        )
+        if persist_status:
+            update_text_job_status(
+                project_id,
+                job_id,
+                status="queued",
+                stage="queued",
+                message="Queued",
+                progress=0.0,
+                error=None,
+                event={"event": "queued"},
+            )
         return True
 
     def active_job_ids(self, *, project_id: str | None = None) -> set[str]:
@@ -133,29 +144,71 @@ class TextJobQueue:
         return {
             "paused": self._paused,
             "current_job_ids": current,
-            "pending_job_ids": pending,
+            # The UI needs counts, not thousands of identifiers on every poll.
+            # Keep a small preview for diagnostics while preserving a bounded
+            # JSON response for large spreadsheet queues.
+            "pending_job_ids": pending[:QUEUE_STATUS_ID_PREVIEW_LIMIT],
+            "pending_job_ids_truncated": max(0, len(pending) - QUEUE_STATUS_ID_PREVIEW_LIMIT),
             "pending_count": len(pending),
             "running_count": len(current),
             "max_text_workers": len(self._workers),
+            "restore": self.restore_status(project_id=project_id),
         }
 
     def enqueue_existing_queued_jobs(self) -> int:
-        self.mark_stale_running_jobs_queued()
         restored = 0
         for project_id in known_text_project_ids():
-            records = sorted(
-                text_job_records(project_id),
-                key=lambda item: text_row_order(item.get("metadata") or {}),
-            )
-            for record in records:
-                status = record.get("status") or {}
-                if normalize_status_key(status.get("status")) != "queued":
-                    continue
-                if self.enqueue(project_id, str(record["job_id"])):
-                    restored += 1
+            self._set_restore_status(project_id, state="restoring", scanned=0, total=0, restored=0, error="")
+            try:
+                queued_jobs = restore_text_project_queue(
+                    project_id,
+                    on_progress=lambda scanned, total, active_project_id=project_id: self._set_restore_status(
+                        active_project_id,
+                        state="restoring",
+                        scanned=scanned,
+                        total=total,
+                    ),
+                )
+                restored_for_project = 0
+                for _row_order, job_id in queued_jobs:
+                    # Status files already say queued. Avoid another write for every
+                    # row during startup, which is especially costly on cloud storage.
+                    if self.enqueue(project_id, job_id, persist_status=False):
+                        restored += 1
+                        restored_for_project += 1
+                self._set_restore_status(
+                    project_id,
+                    state="complete",
+                    restored=restored_for_project,
+                    completed_at=utc_now(),
+                )
+            except Exception as exc:
+                logger.exception("Could not restore text extraction queue for project %s", project_id)
+                self._set_restore_status(project_id, state="failed", error=str(exc), completed_at=utc_now())
         if restored:
             logger.info("Restored %s queued text extraction jobs from disk", restored)
         return restored
+
+    def restore_status(self, *, project_id: str | None = None) -> dict[str, Any]:
+        with self._condition:
+            states = getattr(self, "_restore_states", {})
+            if project_id:
+                return dict(states.get(project_id) or {"state": "idle", "scanned": 0, "total": 0, "restored": 0, "error": ""})
+            if not states:
+                return {"state": "idle", "scanned": 0, "total": 0, "restored": 0, "error": ""}
+            active = [state for state in states.values() if state.get("state") == "restoring"]
+            return dict(active[0] if active else list(states.values())[-1])
+
+    def _set_restore_status(self, project_id: str, **updates: Any) -> None:
+        with self._condition:
+            states = getattr(self, "_restore_states", None)
+            if states is None:
+                states = {}
+                self._restore_states = states
+            state = dict(states.get(project_id) or {"state": "idle", "scanned": 0, "total": 0, "restored": 0, "error": ""})
+            state.update(updates)
+            state.setdefault("started_at", utc_now())
+            states[project_id] = state
 
     def mark_stale_running_jobs_queued(self, *, project_id: str | None = None) -> list[dict[str, Any]]:
         active_ids = self.active_job_ids(project_id=project_id)
@@ -168,7 +221,8 @@ class TextJobQueue:
                 if normalize_status_key(status.get("status")) != "running" or job_id in active_ids:
                     continue
                 message = "Text extraction was interrupted while the app was restarting and has been returned to the queue."
-                jobs.update_status(
+                update_text_job_status(
+                    active_project_id,
                     job_id,
                     status="queued",
                     stage="queued",
@@ -176,7 +230,6 @@ class TextJobQueue:
                     progress=0.0,
                     error=None,
                     event={"event": "stale_text_job_requeued"},
-                    project_id=active_project_id,
                 )
                 marked.append(record)
         return marked
@@ -186,11 +239,12 @@ class TextJobQueue:
             queued = self._next_job()
             key = queue_key(queued.project_id, queued.job_id)
             try:
-                logger.info("Dequeued text extraction job %s", queued.job_id)
+                logger.debug("Dequeued text extraction job %s", queued.job_id)
                 run_text_job(queued.project_id, queued.job_id)
             except Exception:
                 logger.exception("Queued text extraction job %s crashed outside job handling", queued.job_id)
-                jobs.update_status(
+                update_text_job_status(
+                    queued.project_id,
                     queued.job_id,
                     status="failed",
                     stage="error",
@@ -198,7 +252,6 @@ class TextJobQueue:
                     progress=1.0,
                     error="Text extraction job crashed unexpectedly.",
                     event={"event": "error", "message": "Text extraction job crashed unexpectedly."},
-                    project_id=queued.project_id,
                 )
             finally:
                 with self._condition:
@@ -300,12 +353,19 @@ def create_text_source(
         "rows_jsonl": str(rows_path),
     }
     jobs.write_json(source_dir / SOURCE_MANIFEST_FILENAME, manifest)
+    try:
+        text_index.rebuild_source_index(project_id, source_id, rows_path)
+    except Exception:
+        # The JSONL source remains authoritative; a missing derived index is
+        # rebuilt in the background when the app next restores its queues.
+        logger.exception("Could not build text source index for project %s", project_id)
     jobs.write_json(
         text_workbook_path(project_id),
         {
             "project_id": project_id,
             "source_id": source_id,
             "mapping_locked": True,
+            "legacy_migration_complete": True,
             "created_at": now,
             "updated_at": now,
         },
@@ -452,6 +512,7 @@ def create_text_jobs_for_sheet(*, project_id: str, sheet_id: str, settings: JobS
         raise ValueError("The uploaded spreadsheet has no nonblank data rows.")
     system_prompt, prompt_filename, prompt_source_path = resolve_system_prompt(settings)
     created_jobs: list[dict[str, Any]] = []
+    index_entries: list[dict[str, Any]] = []
     for row_order, row_payload in enumerate(rows):
         selected_fields = row_payload.get("selected_fields") or []
         user_prompt = build_user_prompt(selected_fields)
@@ -459,7 +520,7 @@ def create_text_jobs_for_sheet(*, project_id: str, sheet_id: str, settings: JobS
         job_id = jobs.new_job_id()
         root = jobs.create_job(job_id, record_id, settings, project_id=project_id)
         write_text_job_files(root=root, row_payload=row_payload, system_prompt=system_prompt, user_prompt=user_prompt)
-        jobs.update_metadata(
+        metadata = jobs.update_metadata(
             root,
             extraction_type=TEXT_EXTRACTION_TYPE,
             project_id=project_id,
@@ -484,6 +545,17 @@ def create_text_jobs_for_sheet(*, project_id: str, sheet_id: str, settings: JobS
             **jobs.settings_metadata_updates(settings, rq_prompt_filename=prompt_filename),
         )
         created_jobs.append({"job_id": job_id, "record_id": record_id, "row_display_number": row_payload.get("row_display_number")})
+        index_entries.append(
+            text_job_index_entry(
+                metadata,
+                {
+                    "status": "queued",
+                    "stage": "queued",
+                    "message": "Queued",
+                    "error": None,
+                },
+            )
+        )
 
     first_job_id = str(created_jobs[0]["job_id"])
     sheet.update(
@@ -498,8 +570,9 @@ def create_text_jobs_for_sheet(*, project_id: str, sheet_id: str, settings: JobS
         }
     )
     write_text_sheet(sheet)
+    text_index.upsert_jobs(project_id, index_entries)
     for created in created_jobs:
-        text_job_queue.enqueue(project_id, str(created["job_id"]))
+        text_job_queue.enqueue(project_id, str(created["job_id"]), persist_status=False)
     return {
         "sheet": get_text_sheet(project_id, sheet_id),
         "count": len(created_jobs),
@@ -539,14 +612,16 @@ def run_text_job(project_id: str, job_id: str) -> None:
         if metadata.get("extraction_type") != TEXT_EXTRACTION_TYPE:
             raise RuntimeError("Job is not a text extraction row job.")
         settings = jobs.load_job_settings(root)
+        started_at = utc_now()
         jobs.update_metadata(
             root,
-            started_at=utc_now(),
+            started_at=started_at,
             completed_at=None,
             duration_seconds=None,
             error_message=None,
         )
-        jobs.update_status(
+        update_text_job_status(
+            project_id,
             job_id,
             status="running",
             stage="prompt",
@@ -554,7 +629,7 @@ def run_text_job(project_id: str, job_id: str) -> None:
             progress=0.12,
             error=None,
             event={"event": "stage", "stage": "prompt"},
-            project_id=project_id,
+            started_at=started_at,
         )
         system_prompt_file = root / "system_prompt.txt"
         user_prompt_file = root / "user_prompt.txt"
@@ -563,14 +638,14 @@ def run_text_job(project_id: str, job_id: str) -> None:
             raise RuntimeError("Stored row prompt files are missing.")
 
         if settings.rq_provider == "openai":
-            jobs.update_status(
+            update_text_job_status(
+                project_id,
                 job_id,
                 status="running",
                 stage="openai_running",
                 message="OpenAI inference running",
                 progress=0.36,
                 event={"event": "openai_running"},
-                project_id=project_id,
             )
             run_openai_rq(
                 job_id=job_id,
@@ -585,14 +660,14 @@ def run_text_job(project_id: str, job_id: str) -> None:
                 on_event=lambda event: handle_text_llm_event(job_id, event, provider="openai", project_id=project_id),
             )
         else:
-            jobs.update_status(
+            update_text_job_status(
+                project_id,
                 job_id,
                 status="running",
                 stage="rq_model",
                 message="Loading extraction model",
                 progress=0.28,
                 event={"event": "stage", "stage": "rq_model"},
-                project_id=project_id,
             )
             # The queue is sized for OpenAI throughput; retain the previous local
             # inference cap so increasing network concurrency does not overload MLX.
@@ -627,7 +702,8 @@ def run_text_job(project_id: str, job_id: str) -> None:
             text_output_file=str(output_file),
             **jobs.settings_metadata_updates(settings, include_settings=False),
         )
-        jobs.update_status(
+        update_text_job_status(
+            project_id,
             job_id,
             status="complete",
             stage="complete",
@@ -635,12 +711,15 @@ def run_text_job(project_id: str, job_id: str) -> None:
             progress=1.0,
             error=None,
             event={"event": "complete"},
-            project_id=project_id,
+            completed_at=completed_at,
+            duration_seconds=duration_seconds,
+            result_preview=read_text_preview(output_file),
         )
     except Exception as exc:
         logger.exception("Text extraction job %s failed", job_id)
         jobs.update_metadata(root, error_message=str(exc))
-        jobs.update_status(
+        update_text_job_status(
+            project_id,
             job_id,
             status="failed",
             stage="error",
@@ -648,7 +727,6 @@ def run_text_job(project_id: str, job_id: str) -> None:
             progress=1.0,
             error=str(exc),
             event={"event": "error", "message": str(exc)},
-            project_id=project_id,
         )
 
 
@@ -675,15 +753,264 @@ def handle_text_llm_event(job_id: str, event: dict[str, Any], *, provider: str, 
     else:
         message = "Running row extraction"
         progress = 0.72
-    jobs.update_status(
+    update_text_job_status(
+        project_id,
         job_id,
         status="running",
         stage="rq_screening" if provider == "local" else "openai_running",
         message=message,
         progress=progress,
         event=event,
+    )
+
+
+def update_text_job_status(
+    project_id: str,
+    job_id: str,
+    *,
+    status: str,
+    stage: str,
+    message: str,
+    progress: float,
+    error: str | None = None,
+    event: dict[str, Any] | None = None,
+    started_at: str | None = None,
+    completed_at: str | None = None,
+    duration_seconds: float | int | None = None,
+    result_preview: str | None = None,
+) -> None:
+    """Update the durable job state and its lightweight table index together."""
+
+    jobs.update_status(
+        job_id,
+        status=status,
+        stage=stage,
+        message=message,
+        progress=progress,
+        error=error,
+        event=event,
         project_id=project_id,
     )
+    root = jobs.job_dir(job_id, project_id)
+    metadata = jobs.read_metadata(root)
+    if metadata.get("extraction_type") != TEXT_EXTRACTION_TYPE:
+        return
+    try:
+        indexed = text_index.update_job_state(
+            project_id,
+            job_id,
+            status=status,
+            stage=stage,
+            message=message,
+            error=error,
+            started_at=started_at,
+            completed_at=completed_at,
+            duration_seconds=duration_seconds,
+            result_preview=result_preview,
+        )
+        if not indexed:
+            text_index.upsert_job(
+                project_id,
+                text_job_index_entry(
+                    metadata,
+                    {
+                        "status": status,
+                        "stage": stage,
+                        "message": message,
+                        "error": error,
+                    },
+                    result_preview=result_preview or "",
+                ),
+            )
+    except Exception:
+        # The index is a cache derived from the job folders. A failed update must
+        # never prevent the authoritative job state from being persisted.
+        logger.exception("Could not update text row index for job %s", job_id)
+
+
+def text_job_index_entry(
+    metadata: dict[str, Any],
+    status: dict[str, Any],
+    *,
+    result_preview: str = "",
+) -> dict[str, Any]:
+    return {
+        "job_id": str(metadata.get("job_id") or ""),
+        "sheet_id": str(metadata.get("text_sheet_id") or ""),
+        "source_id": str(metadata.get("source_id") or ""),
+        "source_row_index": int(metadata.get("source_row_index") or 0),
+        "model": str(metadata.get("rq_screening_model") or ""),
+        "prompt": str(metadata.get("rq_prompt_filename") or ""),
+        "status": normalize_status_key(status.get("status")),
+        "stage": str(status.get("stage") or ""),
+        "message": str(status.get("message") or ""),
+        "error": str(status.get("error") or metadata.get("error_message") or ""),
+        "started_at": str(metadata.get("started_at") or ""),
+        "completed_at": str(metadata.get("completed_at") or ""),
+        "duration_seconds": metadata.get("duration_seconds"),
+        "result_preview": result_preview,
+        "updated_at": utc_now(),
+    }
+
+
+def rebuild_text_project_index(
+    project_id: str,
+    *,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> list[tuple[int, str]]:
+    """Rebuild a derived text index while streaming job folders one at a time."""
+
+    require_text_project(project_id)
+    migrate_legacy_text_workbook(project_id)
+    for source in list_source_manifests(project_id):
+        source_id = str(source.get("source_id") or "")
+        if not source_id:
+            continue
+        row_count = int(source.get("row_count") or 0)
+        if text_index.source_index_ready(project_id, source_id, row_count):
+            continue
+        text_index.rebuild_source_index(project_id, source_id, source_dir_for(project_id, source_id) / ROWS_JSONL_FILENAME)
+
+    roots = [root for root in jobs.jobs_dir(project_id).iterdir() if root.is_dir()]
+    total = len(roots)
+    if on_progress:
+        on_progress(0, total)
+    entries: list[dict[str, Any]] = []
+    queued_jobs: list[tuple[int, str]] = []
+    for scanned, root in enumerate(roots, start=1):
+        status_path = root / "status.json"
+        metadata_path = root / "metadata.json"
+        if not status_path.exists() or not metadata_path.exists():
+            continue
+        try:
+            status = jobs.read_json(status_path)
+            metadata = jobs.read_metadata(root)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if metadata.get("extraction_type") != TEXT_EXTRACTION_TYPE:
+            continue
+        if not str(metadata.get("text_sheet_id") or ""):
+            continue
+        job_id = str(metadata.get("job_id") or root.name)
+        status_key = normalize_status_key(status.get("status"))
+        if status_key == "running":
+            message = "Text extraction was interrupted while the app was restarting and has been returned to the queue."
+            jobs.update_status(
+                job_id,
+                status="queued",
+                stage="queued",
+                message=message,
+                progress=0.0,
+                error=None,
+                event={"event": "stale_text_job_requeued"},
+                project_id=project_id,
+            )
+            status = {
+                **status,
+                "status": "queued",
+                "stage": "queued",
+                "message": message,
+                "error": None,
+            }
+            status_key = "queued"
+        entries.append(
+            text_job_index_entry(
+                metadata,
+                status,
+                result_preview=read_text_preview(root / TEXT_JOB_OUTPUT) if status_key == "completed" else "",
+            )
+        )
+        if status_key == "queued":
+            queued_jobs.append((text_row_order(metadata), job_id))
+        if on_progress and (scanned == total or scanned % 250 == 0):
+            on_progress(scanned, total)
+
+    text_index.replace_project_job_index(project_id, entries)
+    return sorted(queued_jobs)
+
+
+def restore_text_project_queue(
+    project_id: str,
+    *,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> list[tuple[int, str]]:
+    """Restore queued rows from the cache, rebuilding only when it is absent.
+
+    The SQLite cache is updated alongside durable text-job status changes. A
+    normal restart therefore needs to inspect at most the handful of jobs that
+    were running when it stopped, rather than every queued row. The JSON files
+    remain authoritative and are checked before a stale running row is requeued.
+    """
+
+    require_text_project(project_id)
+    migrate_legacy_text_workbook(project_id)
+    if not text_index.has_job_index(project_id):
+        return rebuild_text_project_index(project_id, on_progress=on_progress)
+
+    total = text_index.indexed_job_count(project_id)
+    if on_progress:
+        on_progress(0, total)
+    running_job_ids = text_index.running_job_ids(project_id)
+    for scanned, job_id in enumerate(running_job_ids, start=1):
+        root = jobs.job_dir(job_id, project_id)
+        try:
+            metadata = jobs.read_metadata(root)
+            if metadata.get("extraction_type") != TEXT_EXTRACTION_TYPE:
+                continue
+            durable_status = jobs.read_status(job_id, project_id=project_id)
+            durable_key = normalize_status_key(durable_status.get("status"))
+            if durable_key == "running":
+                update_text_job_status(
+                    project_id,
+                    job_id,
+                    status="queued",
+                    stage="queued",
+                    message="Text extraction was interrupted while the app was restarting and has been returned to the queue.",
+                    progress=0.0,
+                    error=None,
+                    event={"event": "stale_text_job_requeued"},
+                )
+            else:
+                text_index.upsert_job(
+                    project_id,
+                    text_job_index_entry(
+                        metadata,
+                        durable_status,
+                        result_preview=read_text_preview(root / TEXT_JOB_OUTPUT) if durable_key == "completed" else "",
+                    ),
+                )
+        except Exception:
+            logger.exception("Could not reconcile cached text row %s during queue restore", job_id)
+        if on_progress:
+            on_progress(min(scanned, total), total)
+
+    if on_progress:
+        on_progress(total, total)
+    return text_index.queued_job_refs(project_id)
+
+
+def read_text_preview(path: Path, limit: int = VISIBLE_RESULT_PREVIEW_CHARS) -> str:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return handle.read(max(1, limit)).strip()
+    except FileNotFoundError:
+        return ""
+
+
+def refresh_text_result_previews(project_id: str) -> int:
+    """Backfill UI previews from durable completed-row output files.
+
+    This only repairs the derived SQLite cache. It never changes the stored
+    model output or reruns a job.
+    """
+
+    require_text_project(project_id)
+    updated = 0
+    for job_id in text_index.completed_job_ids_without_preview(project_id):
+        preview = read_text_preview(jobs.job_dir(job_id, project_id) / TEXT_JOB_OUTPUT)
+        if preview and text_index.update_result_preview(project_id, job_id, preview):
+            updated += 1
+    return updated
 
 
 def list_text_jobs(
@@ -702,25 +1029,59 @@ def list_text_jobs(
     if not active_sheet_id:
         return {"items": [], "total": 0, "offset": 0, "limit": max(1, min(500, int(limit or 100))), "sheet_id": ""}
     sheet = get_text_sheet(project_id, active_sheet_id)
-    text_job_queue.mark_stale_running_jobs_queued(project_id=project_id)
-    normalized_status = normalize_status_key(status)
-    query = str(search or "").strip().lower()
     source_id = str(sheet.get("source_id") or "")
     source = source_manifest(project_id, source_id)
+    row_count = int(source.get("row_count") or 0)
+    if text_index.source_index_ready(project_id, source_id, row_count):
+        payload = text_index.list_sheet_rows(
+            project_id=project_id,
+            sheet_id=active_sheet_id,
+            source_id=source_id,
+            offset=offset,
+            limit=limit,
+            status=status,
+            search=search,
+        )
+        return {**payload, "sheet_id": active_sheet_id, "index_ready": True}
+
+    # A previously created sheet can have many jobs. Let the startup restorer
+    # build its compact index in the background instead of rescanning every job
+    # folder from a table-poll request.
+    if bool(sheet.get("is_locked")):
+        return {
+            "items": [],
+            "total": row_count,
+            "offset": max(0, int(offset or 0)),
+            "limit": max(1, min(500, int(limit or 100))),
+            "sheet_id": active_sheet_id,
+            "index_ready": False,
+        }
+
+    try:
+        text_index.rebuild_source_index(project_id, source_id, source_dir_for(project_id, source_id) / ROWS_JSONL_FILENAME)
+        payload = text_index.list_sheet_rows(
+            project_id=project_id,
+            sheet_id=active_sheet_id,
+            source_id=source_id,
+            offset=offset,
+            limit=limit,
+            status=status,
+            search=search,
+        )
+        return {**payload, "sheet_id": active_sheet_id, "index_ready": True}
+    except Exception:
+        logger.exception("Could not build text source index for project %s", project_id)
+
+    normalized_status = normalize_status_key(status)
+    query = str(search or "").strip().lower()
     mappings = source.get("column_mappings") or []
-    records_by_row = {
-        int((record.get("metadata") or {}).get("source_row_index") or 0): record
-        for record in text_job_records(project_id, sheet_id=active_sheet_id)
-    }
     filtered: list[dict[str, Any]] = []
     for row_payload in read_source_row_payloads(project_id, source_id):
-        row_index = int(row_payload.get("source_row_index") or 0)
-        record = records_by_row.get(row_index)
         item = serialize_text_sheet_row(
             project_id=project_id,
             row_payload=row_payload,
             mappings=mappings,
-            record=record,
+            record=None,
         )
         status_key = str(item.get("status") or "not_run")
         if normalized_status != "all" and status_key != normalized_status:
@@ -738,6 +1099,7 @@ def list_text_jobs(
         "offset": safe_offset,
         "limit": safe_limit,
         "sheet_id": active_sheet_id,
+        "index_ready": False,
     }
 
 
@@ -746,20 +1108,33 @@ def text_job_counts(project_id: str, *, sheet_id: str = "") -> dict[str, int]:
     workbook = get_text_workbook(project_id)
     sheets = workbook.get("sheets") or []
     active_sheet_id = str(sheet_id or (sheets[0].get("sheet_id") if sheets else ""))
-    text_job_queue.mark_stale_running_jobs_queued(project_id=project_id)
     counts = {"total": 0, "not_run": 0, "queued": 0, "running": 0, "completed": 0, "failed": 0}
     if not active_sheet_id:
         return counts
     sheet = get_text_sheet(project_id, active_sheet_id)
     source = source_manifest(project_id, str(sheet.get("source_id") or ""))
-    counts["total"] = int(source.get("row_count") or 0)
-    records = text_job_records(project_id, sheet_id=active_sheet_id)
-    for record in records:
-        key = normalize_status_key((record.get("status") or {}).get("status"))
-        if key in counts and key != "total":
-            counts[key] += 1
-    counts["not_run"] = max(0, counts["total"] - len(records))
+    source_id = str(sheet.get("source_id") or "")
+    row_count = int(source.get("row_count") or 0)
+    if text_index.source_index_ready(project_id, source_id, row_count):
+        return text_index.sheet_counts(project_id, active_sheet_id, source_id)
+    counts["total"] = row_count
+    counts["not_run"] = row_count
     return counts
+
+
+def text_sheet_index_ready(project_id: str, sheet_id: str = "") -> bool:
+    workbook = get_text_workbook(project_id)
+    sheets = workbook.get("sheets") or []
+    active_sheet_id = str(sheet_id or (sheets[0].get("sheet_id") if sheets else ""))
+    if not active_sheet_id:
+        return True
+    sheet = get_text_sheet(project_id, active_sheet_id)
+    source = source_manifest(project_id, str(sheet.get("source_id") or ""))
+    return text_index.source_index_ready(
+        project_id,
+        str(sheet.get("source_id") or ""),
+        int(source.get("row_count") or 0),
+    )
 
 
 def retry_text_job(project_id: str, job_id: str, *, sheet_id: str = "") -> dict[str, Any]:
@@ -777,7 +1152,7 @@ def retry_text_job(project_id: str, job_id: str, *, sheet_id: str = "") -> dict[
         raise ValueError("Row is already queued or running.")
     if normalize_status_key(status.get("status")) != "failed":
         raise ValueError("Only failed rows can be retried.")
-    mark_text_job_for_retry(root, previous_status=status)
+    mark_text_job_for_retry(project_id, root, previous_status=status)
     text_job_queue.enqueue(project_id, job_id, front=True)
     return serialize_text_job(text_job_record(project_id, job_id), project_id=project_id)
 
@@ -786,9 +1161,14 @@ def retry_failed_text_jobs(project_id: str, *, sheet_id: str = "") -> dict[str, 
     require_text_project(project_id)
     requeued: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
-    records = sorted(
-        text_job_records(project_id, sheet_id=sheet_id),
-        key=lambda item: text_row_order(item.get("metadata") or {}),
+    indexed_job_ids = text_index.failed_job_ids(project_id, sheet_id)
+    records = (
+        [text_job_record(project_id, job_id) for job_id in indexed_job_ids]
+        if indexed_job_ids
+        else sorted(
+            text_job_records(project_id, sheet_id=sheet_id),
+            key=lambda item: text_row_order(item.get("metadata") or {}),
+        )
     )
     for record in records:
         status = record.get("status") or {}
@@ -798,7 +1178,7 @@ def retry_failed_text_jobs(project_id: str, *, sheet_id: str = "") -> dict[str, 
         try:
             root = jobs.job_dir(job_id, project_id)
             jobs.load_original_job_settings(root)
-            mark_text_job_for_retry(root, previous_status=status)
+            mark_text_job_for_retry(project_id, root, previous_status=status)
             if text_job_queue.enqueue(project_id, job_id):
                 requeued.append(serialize_text_job(text_job_record(project_id, job_id), project_id=project_id))
         except Exception as exc:
@@ -833,6 +1213,35 @@ def export_text_results(project_id: str) -> Path:
     sheets = workbook_state.get("sheets") or []
     if not sheets:
         raise ValueError("Create at least one extraction sheet before exporting.")
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    used_names: set[str] = set()
+    for sheet in sheets:
+        append_text_result_worksheet(workbook, project_id, sheet, used_names)
+    path = projects.project_root(project_id) / f"cerebro_{projects.sanitize_slug(str(project.get('name') or project_id))}_{TEXT_EXPORT_SUFFIX}"
+    workbook.save(path)
+    return path
+
+
+def export_text_worksheet(project_id: str, sheet_id: str) -> Path:
+    project = require_text_project(project_id)
+    sheet = get_text_sheet(project_id, sheet_id)
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    append_text_result_worksheet(workbook, project_id, sheet, set())
+    project_slug = projects.sanitize_slug(str(project.get("name") or project_id))
+    sheet_slug = projects.sanitize_slug(str(sheet.get("name") or sheet_id))
+    path = projects.project_root(project_id) / f"cerebro_{project_slug}_{sheet_slug}_{TEXT_WORKSHEET_EXPORT_SUFFIX}"
+    workbook.save(path)
+    return path
+
+
+def append_text_result_worksheet(
+    workbook: Workbook,
+    project_id: str,
+    sheet: dict[str, Any],
+    used_names: set[str],
+) -> None:
     cerebro_columns = [
         "cerebro_extracted_at",
         "cerebro_processing_time_seconds",
@@ -842,47 +1251,40 @@ def export_text_results(project_id: str) -> Path:
         "cerebro_error",
         "cerebro_output",
     ]
-    workbook = Workbook()
-    workbook.remove(workbook.active)
-    used_names: set[str] = set()
-    for sheet in sheets:
-        source_id = str(sheet.get("source_id") or "")
-        source = source_manifest(project_id, source_id)
-        original_columns = [str(column) for column in source.get("columns") or []]
-        worksheet = workbook.create_sheet(safe_text_worksheet_name(str(sheet.get("name") or "Sheet"), used_names))
-        worksheet.append(original_columns + cerebro_columns)
-        records_by_row = {
-            int((record.get("metadata") or {}).get("source_row_index") or 0): record
-            for record in text_job_records(project_id, sheet_id=str(sheet.get("sheet_id") or ""))
-        }
-        for row_payload in read_source_row_payloads(project_id, source_id):
-            row_index = int(row_payload.get("source_row_index") or 0)
-            original_row = row_payload.get("row") or {}
-            record = records_by_row.get(row_index)
-            metadata = (record or {}).get("metadata") or {}
-            status = (record or {}).get("status") or {}
-            status_key = normalize_status_key(status.get("status")) if record else "not_run"
-            output = ""
-            if record and status_key == "completed":
-                output = read_text_if_exists(jobs.job_dir(str(record["job_id"]), project_id) / TEXT_JOB_OUTPUT)
-            worksheet.append(
-                [original_row.get(column, "") for column in original_columns]
-                + [
-                    str(metadata.get("completed_at") or ""),
-                    metadata.get("duration_seconds"),
-                    str(metadata.get("rq_screening_model") or sheet.get("rq_screening_model") or ""),
-                    str(metadata.get("rq_prompt_filename") or sheet.get("rq_prompt_filename") or ""),
-                    status_label(status_key),
-                    str(status.get("error") or metadata.get("error_message") or ""),
-                    output,
-                ]
-            )
-        for column in worksheet.columns:
-            letter = column[0].column_letter
-            worksheet.column_dimensions[letter].width = min(max(len(str(column[0].value or "")) + 4, 14), 60)
-    path = projects.project_root(project_id) / f"cerebro_{projects.sanitize_slug(str(project.get('name') or project_id))}_{TEXT_EXPORT_SUFFIX}"
-    workbook.save(path)
-    return path
+    source_id = str(sheet.get("source_id") or "")
+    source = source_manifest(project_id, source_id)
+    original_columns = [str(column) for column in source.get("columns") or []]
+    worksheet = workbook.create_sheet(safe_text_worksheet_name(str(sheet.get("name") or "Sheet"), used_names))
+    worksheet.append(original_columns + cerebro_columns)
+    records_by_row = {
+        int((record.get("metadata") or {}).get("source_row_index") or 0): record
+        for record in text_job_records(project_id, sheet_id=str(sheet.get("sheet_id") or ""))
+    }
+    for row_payload in read_source_row_payloads(project_id, source_id):
+        row_index = int(row_payload.get("source_row_index") or 0)
+        original_row = row_payload.get("row") or {}
+        record = records_by_row.get(row_index)
+        metadata = (record or {}).get("metadata") or {}
+        status = (record or {}).get("status") or {}
+        status_key = normalize_status_key(status.get("status")) if record else "not_run"
+        output = ""
+        if record and status_key == "completed":
+            output = read_text_if_exists(jobs.job_dir(str(record["job_id"]), project_id) / TEXT_JOB_OUTPUT)
+        worksheet.append(
+            [original_row.get(column, "") for column in original_columns]
+            + [
+                str(metadata.get("completed_at") or ""),
+                metadata.get("duration_seconds"),
+                str(metadata.get("rq_screening_model") or sheet.get("rq_screening_model") or ""),
+                str(metadata.get("rq_prompt_filename") or sheet.get("rq_prompt_filename") or ""),
+                status_label(status_key),
+                str(status.get("error") or metadata.get("error_message") or ""),
+                output,
+            ]
+        )
+    for column in worksheet.columns:
+        letter = column[0].column_letter
+        worksheet.column_dimensions[letter].width = min(max(len(str(column[0].value or "")) + 4, 14), 60)
 
 
 def require_text_project(project_id: str) -> dict[str, Any]:
@@ -904,8 +1306,21 @@ def migrate_legacy_text_workbook(project_id: str) -> dict[str, Any]:
     require_text_project(project_id)
     workbook_path = text_workbook_path(project_id)
     workbook = read_json_if_exists(workbook_path)
-    all_records = text_job_records(project_id)
     sources = list_source_manifests(project_id)
+    sheets = list_text_sheets(project_id, migrate=False)
+
+    # Modern workbooks already persist their source and sheet linkage. Do not
+    # scan every row-job folder on each dashboard request merely to check for a
+    # legacy migration that is no longer needed.
+    if workbook.get("legacy_migration_complete"):
+        return workbook
+    if workbook and workbook.get("source_id") and workbook.get("mapping_locked") and sheets:
+        workbook["legacy_migration_complete"] = True
+        workbook["updated_at"] = utc_now()
+        jobs.write_json(workbook_path, workbook)
+        return workbook
+
+    all_records = text_job_records(project_id)
     if not workbook and not sources and not all_records:
         return {}
 
@@ -926,7 +1341,6 @@ def migrate_legacy_text_workbook(project_id: str) -> dict[str, Any]:
         }
         jobs.write_json(workbook_path, workbook)
 
-    sheets = list_text_sheets(project_id, migrate=False)
     for sheet in sheets:
         locked_job_id = str(sheet.get("locked_by_job_id") or "")
         if not locked_job_id:
@@ -1003,7 +1417,10 @@ def migrate_legacy_text_workbook(project_id: str) -> dict[str, Any]:
                 text_sheet_name=str(matching.get("name") or matching["sheet_id"]),
                 sheet_row_order=int((record.get("metadata") or {}).get("source_row_index") or 0),
             )
-    return read_json_if_exists(workbook_path)
+    workbook["legacy_migration_complete"] = True
+    workbook["updated_at"] = utc_now()
+    jobs.write_json(workbook_path, workbook)
+    return workbook
 
 
 def text_workbook_path(project_id: str) -> Path:
@@ -1340,13 +1757,13 @@ def copy_output_for_compatibility(root: Path) -> None:
     shutil.copy2(output, compatibility_output)
 
 
-def mark_text_job_for_retry(root: Path, *, previous_status: dict[str, Any]) -> None:
+def mark_text_job_for_retry(project_id: str, root: Path, *, previous_status: dict[str, Any]) -> None:
     for path in [root / TEXT_JOB_OUTPUT, root / "outputs" / "rq_screening_output.md"]:
         try:
             path.unlink()
         except FileNotFoundError:
             pass
-    jobs.update_metadata(
+    metadata = jobs.update_metadata(
         root,
         retry_failed_at=utc_now(),
         retry_failed_from_status=previous_status.get("status"),
@@ -1355,6 +1772,21 @@ def mark_text_job_for_retry(root: Path, *, previous_status: dict[str, Any]) -> N
         duration_seconds=None,
         error_message=None,
     )
+    try:
+        text_index.upsert_job(
+            project_id,
+            text_job_index_entry(
+                metadata,
+                {
+                    "status": "queued",
+                    "stage": "queued",
+                    "message": "Queued for retry",
+                    "error": None,
+                },
+            ),
+        )
+    except Exception:
+        logger.exception("Could not reset indexed text row state for retry %s", root.name)
 
 
 def text_job_records(project_id: str, *, sheet_id: str = "") -> list[dict[str, Any]]:
@@ -1373,10 +1805,17 @@ def text_job_records(project_id: str, *, sheet_id: str = "") -> list[dict[str, A
 
 
 def text_job_record(project_id: str, job_id: str) -> dict[str, Any]:
-    for record in text_job_records(project_id):
-        if str(record["job_id"]) == job_id:
-            return record
-    raise FileNotFoundError("Text row job not found.")
+    root = jobs.job_dir(job_id, project_id)
+    if not root.exists():
+        raise FileNotFoundError("Text row job not found.")
+    metadata = jobs.read_metadata(root)
+    if metadata.get("extraction_type") != TEXT_EXTRACTION_TYPE:
+        raise FileNotFoundError("Text row job not found.")
+    return {
+        "job_id": str(metadata.get("job_id") or job_id),
+        "metadata": metadata,
+        "status": jobs.read_status(job_id, project_id=project_id),
+    }
 
 
 def serialize_text_job(record: dict[str, Any], *, project_id: str) -> dict[str, Any]:

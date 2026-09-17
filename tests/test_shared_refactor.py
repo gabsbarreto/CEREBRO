@@ -214,6 +214,33 @@ class SharedHelperTests(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--input-file-id") + 1], "file-abc")
         self.assertEqual(cmd[cmd.index("--reasoning-effort") + 1], "xhigh")
 
+    def test_openai_rq_passes_multiple_input_file_paths(self) -> None:
+        calls = []
+        original_runner = openai_rq.run_event_process
+        try:
+            def fake_runner(**kwargs):
+                calls.append(kwargs)
+                return type("Result", (), {"return_code": 0, "details": ""})()
+
+            openai_rq.run_event_process = fake_runner
+            openai_rq.run_openai_rq(
+                job_id="study-bundle",
+                model="gpt-5.4-mini",
+                system_prompt_file=Path("system.txt"),
+                user_prompt_file=Path("user.txt"),
+                output_file=Path("out.md"),
+                max_tokens=100,
+                enable_reasoning=True,
+                reasoning_effort="high",
+                input_file_paths=[Path("primary.pdf"), Path("supplement.xlsx")],
+            )
+        finally:
+            openai_rq.run_event_process = original_runner
+
+        cmd = calls[0]["cmd"]
+        indices = [index for index, value in enumerate(cmd) if value == "--input-file-path"]
+        self.assertEqual([cmd[index + 1] for index in indices], ["primary.pdf", "supplement.xlsx"])
+
 
 class JobIdentityTests(unittest.TestCase):
     def test_settings_metadata_updates_preserve_persisted_shape(self) -> None:
@@ -370,6 +397,155 @@ class JobIdentityTests(unittest.TestCase):
             config.JOBS_DIR = original_jobs_dir
 
 
+class StudyBundleTests(unittest.TestCase):
+    def test_bundle_persistence_and_rerun_keep_every_source_file(self) -> None:
+        class Upload:
+            def __init__(self, filename: str, payload: bytes) -> None:
+                self.filename = filename
+                self.file = BytesIO(payload)
+
+        original_jobs_dir = config.JOBS_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config.JOBS_DIR = Path(tmpdir) / "jobs"
+                config.JOBS_DIR.mkdir(parents=True, exist_ok=True)
+                settings = JobSettings()
+                source_root = jobs.create_job("bundle-source", "article.pdf", settings)
+                primary = Upload("article.pdf", b"%PDF primary")
+                supplement = Upload("article supplementary.csv", b"study_id,result\nA,positive\n")
+                bundle = jobs.save_source_bundle(
+                    source_root,
+                    primary,
+                    "Pilot/article.pdf",
+                    [{"upload": supplement, "relative_path": "Pilot/article supplementary.csv"}],
+                )
+                jobs.update_metadata(source_root, **bundle)
+
+                records = jobs.source_file_records(source_root)
+                self.assertEqual([record["role"] for record in records], ["primary_pdf", "supporting_file"])
+                self.assertEqual([record["filename"] for record in records], ["article.pdf", "article supplementary.csv"])
+                self.assertTrue((source_root / "input" / "uploaded.pdf").exists())
+                self.assertTrue((source_root / "input" / "attachments").exists())
+                self.assertEqual(bundle["source_bundle_sha256"], jobs.source_bundle_sha256(records))
+
+                _child_id, child_root = jobs.create_screening_rerun_child_job("bundle-source", settings)
+                child_records = jobs.source_file_records(child_root)
+                self.assertEqual([record["filename"] for record in child_records], ["article.pdf", "article supplementary.csv"])
+                self.assertEqual(
+                    (child_records[1]["path"]).read_bytes(),
+                    b"study_id,result\nA,positive\n",
+                )
+        finally:
+            config.JOBS_DIR = original_jobs_dir
+
+    def test_bundle_validation_maps_supporting_files_to_primary_pdf(self) -> None:
+        from app.main import validated_study_upload_bundles
+        from starlette.datastructures import UploadFile
+
+        primary_one = UploadFile(filename="one.pdf", file=BytesIO(b"%PDF one"))
+        primary_two = UploadFile(filename="two.pdf", file=BytesIO(b"%PDF two"))
+        supplement = UploadFile(filename="one supplement.xlsx", file=BytesIO(b"xlsx"))
+        bundles = validated_study_upload_bundles(
+            [primary_one, primary_two],
+            None,
+            ["Pilot/one.pdf", "Pilot/two.pdf"],
+            [supplement],
+            ["0"],
+            ["Pilot/one supplement.xlsx"],
+        )
+
+        self.assertEqual(len(bundles), 2)
+        self.assertEqual(bundles[0]["relative_path"], "Pilot/one.pdf")
+        self.assertEqual(bundles[0]["attachments"][0]["relative_path"], "Pilot/one supplement.xlsx")
+        self.assertEqual(bundles[1]["attachments"], [])
+
+    def test_pdf_job_endpoint_persists_multipart_study_bundle(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from app.main import app, job_queue
+        from app.services import projects
+
+        original_data_dir = config.DATA_DIR
+        original_jobs_dir = config.JOBS_DIR
+        original_projects_dir = config.PROJECTS_DIR
+        original_enqueue = job_queue.enqueue
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                config.DATA_DIR = root / "data"
+                config.JOBS_DIR = config.DATA_DIR / "jobs"
+                config.PROJECTS_DIR = config.DATA_DIR / "projects"
+                config.JOBS_DIR.mkdir(parents=True, exist_ok=True)
+                config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+                project = projects.get_default_project()
+                queued: list[tuple[str, str]] = []
+                job_queue.enqueue = lambda job_id, _settings, *, project_id=None: queued.append((job_id, str(project_id)))
+
+                response = TestClient(app).post(
+                    "/api/jobs",
+                    data={
+                        "project_id": project["project_id"],
+                        "rq_model_preset": "qwen35_9b_8bit_reasoning",
+                        "rq_system_prompt": "Extract the supplied study.",
+                        "pdf_relative_paths": "With attachment/article.pdf",
+                        "attachment_primary_indices": "0",
+                        "attachment_relative_paths": "With attachment/article supplementary.csv",
+                    },
+                    files=[
+                        ("pdfs", ("article.pdf", b"%PDF primary", "application/pdf")),
+                        ("attachments", ("article supplementary.csv", b"study_id,result\nA,positive\n", "text/csv")),
+                    ],
+                )
+
+                self.assertEqual(response.status_code, 200)
+                payload = response.json()
+                self.assertEqual(payload["count"], 1)
+                self.assertEqual(payload["jobs"][0]["supporting_file_count"], "1")
+                self.assertEqual(queued[0][1], project["project_id"])
+                root = jobs.job_dir(payload["job_id"], project["project_id"])
+                records = jobs.source_file_records(root)
+                self.assertEqual([record["filename"] for record in records], ["article.pdf", "article supplementary.csv"])
+                self.assertEqual(records[1]["relative_path"], "With attachment/article supplementary.csv")
+        finally:
+            job_queue.enqueue = original_enqueue
+            config.DATA_DIR = original_data_dir
+            config.JOBS_DIR = original_jobs_dir
+            config.PROJECTS_DIR = original_projects_dir
+
+    def test_csv_supporting_source_is_transcribed_for_local_prompting(self) -> None:
+        from app.services import supplementary_sources
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "support.csv"
+            source.write_text("study_id,result\nA,positive\n", encoding="utf-8")
+            transcripts = supplementary_sources.transcript_spreadsheet_sources(
+                [{"filename": "support.csv", "path": source}],
+                root / "outputs",
+            )
+
+            self.assertEqual(len(transcripts), 1)
+            self.assertEqual(transcripts[0].warning, "")
+            self.assertTrue(transcripts[0].output_path and transcripts[0].output_path.exists())
+            self.assertIn("Supporting spreadsheet: support.csv", transcripts[0].text)
+            self.assertIn("study_id\tresult", transcripts[0].text)
+
+    def test_ocr_merge_includes_primary_and_supporting_pdf_pages_in_order(self) -> None:
+        from app.services.ocr_merge import merge_page_texts
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            ocr_dir = root / "ocr_text"
+            ocr_dir.mkdir()
+            (ocr_dir / "page_000001__primary_0001.md").write_text("Primary text", encoding="utf-8")
+            (ocr_dir / "page_000002__supporting_001_0001.md").write_text("Supporting text", encoding="utf-8")
+            merged = merge_page_texts(ocr_dir, root / "merged.md")
+
+            self.assertLess(merged.index("Primary text"), merged.index("Supporting text"))
+            self.assertIn("[PRIMARY PDF - PAGE 1]", merged)
+            self.assertIn("[SUPPORTING PDF 1 - PAGE 1]", merged)
+
+
 class PipelineConcurrencyTests(unittest.TestCase):
     def test_openai_pdf_file_mode_skips_ocr_and_stores_file_id(self) -> None:
         from app.services import rq_screening_pipeline as pipeline
@@ -425,6 +601,74 @@ class PipelineConcurrencyTests(unittest.TestCase):
             pipeline.page_count = original_page_count
             pipeline.render_pdf_to_images = original_render
             pipeline.run_deepseek_ocr = original_ocr
+            pipeline.run_openai_rq = original_openai
+            config.JOBS_DIR = original_jobs_dir
+            config.SUMMARY_XLSX_PATH = original_summary_path
+
+    def test_openai_pdf_file_mode_sends_primary_and_supporting_sources(self) -> None:
+        from app.services import rq_screening_pipeline as pipeline
+
+        class Upload:
+            def __init__(self, filename: str, payload: bytes) -> None:
+                self.filename = filename
+                self.file = BytesIO(payload)
+
+        original_jobs_dir = config.JOBS_DIR
+        original_summary_path = config.SUMMARY_XLSX_PATH
+        original_page_count = pipeline.page_count
+        original_openai = pipeline.run_openai_rq
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                config.JOBS_DIR = root / "jobs"
+                config.SUMMARY_XLSX_PATH = root / "summary.xlsx"
+                config.JOBS_DIR.mkdir(parents=True, exist_ok=True)
+                pipeline.page_count = lambda _pdf_path: 2
+
+                captured = {}
+
+                def fake_openai_runner(**kwargs) -> None:
+                    captured.update(kwargs)
+                    self.assertEqual(kwargs["input_file_id"], "")
+                    self.assertIsNone(kwargs["input_file_path"])
+                    self.assertEqual(
+                        [Path(path).suffix for path in kwargs["input_file_paths"]],
+                        [".pdf", ".xlsx"],
+                    )
+                    callback = kwargs.get("on_event")
+                    if callback is not None:
+                        callback({"event": "openai_file_uploaded", "file_id": "file-primary", "source_index": 0})
+                        callback({"event": "openai_file_uploaded", "file_id": "file-support", "source_index": 1})
+                        callback({"event": "rq_generation_finished"})
+                    Path(kwargs["output_file"]).write_text("bundle result", encoding="utf-8")
+
+                pipeline.run_openai_rq = fake_openai_runner
+                settings = JobSettings.from_form(
+                    {
+                        "rq_model_preset": "openai_gpt5_mini_high",
+                        "openai_input_mode": "pdf_file",
+                        "rq_prompt_filename": "prompt_file.txt",
+                        "rq_system_prompt": "Use all attached study sources.",
+                    }
+                )
+                job_root = jobs.create_job("pdf-bundle-job", "paper.pdf", settings)
+                metadata = jobs.save_source_bundle(
+                    job_root,
+                    Upload("paper.pdf", b"%PDF mock"),
+                    "With attachment/paper.pdf",
+                    [{"upload": Upload("paper supplementary.xlsx", b"xlsx"), "relative_path": "With attachment/paper supplementary.xlsx"}],
+                )
+                jobs.update_metadata(job_root, **metadata)
+
+                pipeline.run_job("pdf-bundle-job", settings, defer_openai=False)
+
+                self.assertTrue(captured)
+                persisted = jobs.read_metadata(job_root)
+                self.assertEqual(persisted["openai_file_ids"], ["file-primary", "file-support"])
+                self.assertTrue(persisted["openai_file_complete"])
+                self.assertEqual(jobs.read_status("pdf-bundle-job")["status"], "complete")
+        finally:
+            pipeline.page_count = original_page_count
             pipeline.run_openai_rq = original_openai
             config.JOBS_DIR = original_jobs_dir
             config.SUMMARY_XLSX_PATH = original_summary_path
@@ -710,10 +954,12 @@ class RerunEndpointTests(unittest.TestCase):
 
 class TextWorkbookTests(unittest.TestCase):
     def test_text_workbook_freezes_mapping_duplicates_sheets_and_exports_full_rows(self) -> None:
+        from fastapi.testclient import TestClient
         from openpyxl import load_workbook
         from starlette.datastructures import UploadFile
 
-        from app.services import projects, text_extraction
+        from app.main import app
+        from app.services import projects, text_extraction, text_index
 
         original_projects_dir = config.PROJECTS_DIR
         try:
@@ -739,13 +985,36 @@ class TextWorkbookTests(unittest.TestCase):
                 self.assertEqual(created["source"]["row_count"], 2)
                 self.assertEqual([mapping["column_name"] for mapping in created["source"]["column_mappings"]], ["title", "abstract"])
                 first_sheet = created["sheet"]
+                self.assertTrue(
+                    text_index.source_index_ready(
+                        str(project["project_id"]),
+                        str(created["source"]["source_id"]),
+                        2,
+                    )
+                )
                 rows = text_extraction.list_text_jobs(
                     project_id=str(project["project_id"]),
                     sheet_id=str(first_sheet["sheet_id"]),
                 )
                 self.assertEqual(rows["total"], 2)
+                self.assertTrue(rows["index_ready"])
                 self.assertEqual(rows["items"][0]["status"], "not_run")
                 self.assertEqual(rows["items"][0]["mapped_cells"], {"title": "First title", "abstract": "First abstract"})
+                text_index.upsert_job(
+                    str(project["project_id"]),
+                    {
+                        "job_id": "indexed-row-job",
+                        "sheet_id": str(first_sheet["sheet_id"]),
+                        "source_id": str(created["source"]["source_id"]),
+                        "source_row_index": 0,
+                        "model": "test-model",
+                        "prompt": "screening.txt",
+                        "status": "queued",
+                    },
+                )
+                self.assertTrue(text_index.has_job_index(str(project["project_id"])))
+                self.assertEqual(text_index.queued_job_refs(str(project["project_id"])), [(0, "indexed-row-job")])
+                self.assertTrue(text_index.update_result_preview(str(project["project_id"]), "indexed-row-job", "Preview text"))
 
                 duplicate = text_extraction.duplicate_text_sheet(str(project["project_id"]), str(first_sheet["sheet_id"]))
                 self.assertEqual(duplicate["name"], "Sheet 1 (1)")
@@ -773,6 +1042,32 @@ class TextWorkbookTests(unittest.TestCase):
                 self.assertEqual(worksheet.max_row - 1, 2)
                 self.assertEqual(worksheet.cell(row=2, column=headers.index("cerebro_status") + 1).value, "Not run")
                 workbook.close()
+
+                worksheet_path = text_extraction.export_text_worksheet(
+                    str(project["project_id"]),
+                    str(first_sheet["sheet_id"]),
+                )
+                selected_workbook = load_workbook(worksheet_path, read_only=True, data_only=True)
+                self.assertEqual(selected_workbook.sheetnames, ["Sheet 1"])
+                selected_worksheet = selected_workbook["Sheet 1"]
+                selected_headers = [cell.value for cell in next(selected_worksheet.iter_rows(min_row=1, max_row=1))]
+                self.assertEqual(selected_headers[:4], ["study_id", "title", "abstract", "authors"])
+                self.assertEqual(selected_headers[-1], "cerebro_output")
+                self.assertEqual(selected_worksheet.max_row - 1, 2)
+                selected_workbook.close()
+
+                client = TestClient(app)
+                page_response = client.get(f"/text?project_id={project['project_id']}")
+                self.assertEqual(page_response.status_code, 200)
+                self.assertIn('id="textWorksheetExportButton"', page_response.text)
+                worksheet_response = client.get(
+                    f"/api/text/sheets/{first_sheet['sheet_id']}/export?project_id={project['project_id']}"
+                )
+                self.assertEqual(worksheet_response.status_code, 200)
+                self.assertIn("sheet-1", worksheet_response.headers["content-disposition"])
+                route_workbook = load_workbook(BytesIO(worksheet_response.content), read_only=True, data_only=True)
+                self.assertEqual(route_workbook.sheetnames, ["Sheet 1"])
+                route_workbook.close()
         finally:
             config.PROJECTS_DIR = original_projects_dir
 
@@ -784,6 +1079,248 @@ class StructuredExtractionTests(unittest.TestCase):
         self.assertEqual(projects.normalize_extraction_type("pdf_structured"), "pdf_structured")
         self.assertEqual(projects.normalize_extraction_type("structured-pdf"), "pdf_structured")
         self.assertEqual(projects.normalize_extraction_type("structured_pdf_extraction"), "pdf_structured")
+
+    def test_legacy_structured_sheets_migrate_to_a_default_workbook_without_moving_data(self) -> None:
+        from app.services import projects, structured_extraction
+
+        original_projects_dir = config.PROJECTS_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config.PROJECTS_DIR = Path(tmpdir) / "projects"
+                config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+                project = projects.create_project("Legacy structured", "", "pdf_structured")
+                project_id = str(project["project_id"])
+                legacy_root = projects.project_root(project_id) / structured_extraction.STRUCTURED_SHEETS_DIRNAME / "legacy-sheet"
+                legacy_root.mkdir(parents=True, exist_ok=True)
+                jobs.write_json(
+                    legacy_root / structured_extraction.SHEET_FILENAME,
+                    {
+                        "sheet_id": "legacy-sheet",
+                        "project_id": project_id,
+                        "name": "Legacy sheet",
+                        "context": "Existing context.",
+                        "row_unit": "Existing preferences.",
+                        "columns": [{"column_name": "Finding", "question": "State the finding.", "rules": ""}],
+                        "sheet_order": 0,
+                        "created_at": "2026-09-01T00:00:00+00:00",
+                    },
+                )
+                (legacy_root / structured_extraction.ROWS_JSONL_FILENAME).write_text(
+                    json.dumps({"job_id": "legacy-job", "source_pdf": "legacy.pdf", "cells": {"Finding": "Present"}}) + "\n",
+                    encoding="utf-8",
+                )
+                (legacy_root / structured_extraction.ERRORS_JSONL_FILENAME).write_text("", encoding="utf-8")
+
+                workbooks = structured_extraction.list_workbooks(project_id)
+                self.assertEqual([workbook["name"] for workbook in workbooks], ["Workbook 1"])
+                migrated_sheet = structured_extraction.get_sheet(project_id, "legacy-sheet")
+                self.assertEqual(migrated_sheet["workbook_id"], workbooks[0]["workbook_id"])
+                self.assertTrue((legacy_root / structured_extraction.ROWS_JSONL_FILENAME).exists())
+                self.assertEqual(
+                    structured_extraction.list_rows(
+                        project_id=project_id,
+                        workbook_id=str(workbooks[0]["workbook_id"]),
+                        sheet_id="legacy-sheet",
+                    )["total"],
+                    1,
+                )
+        finally:
+            config.PROJECTS_DIR = original_projects_dir
+
+    def test_project_workbooks_scope_sheets_jobs_and_export(self) -> None:
+        from openpyxl import load_workbook
+
+        from app.models import JobSettings
+        from app.services import projects, structured_extraction
+
+        original_projects_dir = config.PROJECTS_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config.PROJECTS_DIR = Path(tmpdir) / "projects"
+                config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+                project = projects.create_project("Workbook scope", "", "pdf_structured")
+                project_id = str(project["project_id"])
+                first_workbook = structured_extraction.get_default_workbook(project_id)
+                first_sheet = structured_extraction.create_sheet(
+                    project_id=project_id,
+                    workbook_id=str(first_workbook["workbook_id"]),
+                    name="First sheet",
+                    columns=[{"column_name": "First", "question": "First question.", "rules": ""}],
+                )
+                second_workbook = structured_extraction.create_workbook(project_id=project_id, name="Comparison")
+                second_sheet = structured_extraction.create_sheet(
+                    project_id=project_id,
+                    workbook_id=str(second_workbook["workbook_id"]),
+                    name="Second sheet",
+                    columns=[{"column_name": "Second", "question": "Second question.", "rules": ""}],
+                )
+                self.assertEqual(
+                    [sheet["name"] for sheet in structured_extraction.list_sheets(project_id, str(first_workbook["workbook_id"]))],
+                    ["First sheet"],
+                )
+                self.assertEqual(
+                    [sheet["name"] for sheet in structured_extraction.list_sheets(project_id, str(second_workbook["workbook_id"]))],
+                    ["Second sheet"],
+                )
+
+                root = jobs.create_job("comparison-job", "comparison.pdf", JobSettings(), project_id=project_id)
+                jobs.update_metadata(
+                    root,
+                    extraction_type="pdf_structured",
+                    structured_workbook_id=second_workbook["workbook_id"],
+                    structured_sheet_id=second_sheet["sheet_id"],
+                )
+                self.assertEqual(
+                    structured_extraction.list_structured_jobs_window(
+                        project_id,
+                        workbook_id=str(first_workbook["workbook_id"]),
+                    )["total"],
+                    0,
+                )
+                self.assertEqual(
+                    structured_extraction.list_structured_jobs_window(
+                        project_id,
+                        workbook_id=str(second_workbook["workbook_id"]),
+                    )["total"],
+                    1,
+                )
+
+                structured_extraction.replace_job_sheet_records(
+                    project_id,
+                    str(second_sheet["sheet_id"]),
+                    "comparison-job",
+                    [{"job_id": "comparison-job", "source_pdf": "comparison.pdf", "cells": {"Second": "Value"}}],
+                    [],
+                )
+                export_path = structured_extraction.export_structured_workbook(
+                    project_id,
+                    workbook_id=str(second_workbook["workbook_id"]),
+                )
+                exported = load_workbook(export_path, read_only=True)
+                self.assertEqual(exported.sheetnames, ["Second sheet"])
+                exported.close()
+
+                duplicated = structured_extraction.duplicate_project_workbook(
+                    project_id,
+                    str(second_workbook["workbook_id"]),
+                )
+                self.assertEqual([sheet["name"] for sheet in duplicated["sheets"]], ["Second sheet"])
+                self.assertFalse(duplicated["sheets"][0]["is_locked"])
+                self.assertEqual(
+                    structured_extraction.list_rows(
+                        project_id=project_id,
+                        workbook_id=str(duplicated["workbook"]["workbook_id"]),
+                        sheet_id=str(duplicated["sheets"][0]["sheet_id"]),
+                    )["total"],
+                    0,
+                )
+        finally:
+            config.PROJECTS_DIR = original_projects_dir
+
+    def test_structured_pdf_library_copies_complete_source_bundles_for_reuse(self) -> None:
+        from app.services import projects, structured_sources
+
+        class Upload:
+            def __init__(self, filename: str, payload: bytes) -> None:
+                self.filename = filename
+                self.file = BytesIO(payload)
+
+        original_projects_dir = config.PROJECTS_DIR
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config.PROJECTS_DIR = Path(tmpdir) / "projects"
+                config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+                project = projects.create_project("Source library", "", "pdf_structured")
+                project_id = str(project["project_id"])
+                created = structured_sources.create_sources(
+                    project_id,
+                    [
+                        {
+                            "upload": Upload("article.pdf", b"%PDF primary"),
+                            "relative_path": "Studies/article.pdf",
+                            "attachments": [
+                                {
+                                    "upload": Upload("article supplement.csv", b"record,value\nA,1\n"),
+                                    "relative_path": "Studies/article supplement.csv",
+                                }
+                            ],
+                        }
+                    ],
+                )
+                self.assertEqual(len(created["created"]), 1)
+                source = created["created"][0]
+                self.assertEqual(source["supporting_file_count"], 1)
+                target = jobs.create_job("library-job", "article.pdf", JobSettings(), project_id=project_id)
+                metadata = structured_sources.copy_source_to_job(project_id, str(source["source_id"]), target)
+                jobs.update_metadata(target, **metadata)
+                records = jobs.source_file_records(target)
+                self.assertEqual([record["filename"] for record in records], ["article.pdf", "article supplement.csv"])
+                self.assertEqual(records[1]["path"].read_bytes(), b"record,value\nA,1\n")
+                self.assertEqual(metadata["source_library_id"], source["source_id"])
+        finally:
+            config.PROJECTS_DIR = original_projects_dir
+
+    def test_structured_source_routes_queue_library_jobs_in_the_selected_workbook(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from app.main import app, job_queue
+        from app.services import jobs as job_service
+        from app.services import projects, structured_extraction
+
+        original_projects_dir = config.PROJECTS_DIR
+        original_enqueue = job_queue.enqueue
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config.PROJECTS_DIR = Path(tmpdir) / "projects"
+                config.PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+                project = projects.create_project("Library route", "", "pdf_structured")
+                project_id = str(project["project_id"])
+                workbook = structured_extraction.get_default_workbook(project_id)
+                sheet = structured_extraction.create_sheet(
+                    project_id=project_id,
+                    workbook_id=str(workbook["workbook_id"]),
+                    name="Route sheet",
+                    columns=[{"column_name": "Finding", "question": "State the finding.", "rules": ""}],
+                )
+                job_queue.enqueue = lambda _job_id, _settings, project_id=None: None
+                client = TestClient(app)
+                source_response = client.post(
+                    "/api/structured/sources",
+                    data={
+                        "project_id": project_id,
+                        "pdf_relative_paths": "Route/article.pdf",
+                        "attachment_primary_indices": "0",
+                        "attachment_relative_paths": "Route/article supplement.csv",
+                    },
+                    files=[
+                        ("pdfs", ("article.pdf", b"%PDF primary", "application/pdf")),
+                        ("attachments", ("article supplement.csv", b"record,value\nA,1\n", "text/csv")),
+                    ],
+                )
+                self.assertEqual(source_response.status_code, 200)
+                source_id = source_response.json()["created"][0]["source_id"]
+
+                job_response = client.post(
+                    "/api/structured/jobs",
+                    data={
+                        "project_id": project_id,
+                        "workbook_id": workbook["workbook_id"],
+                        "sheet_id": sheet["sheet_id"],
+                        "source_ids": json.dumps([source_id]),
+                        "rq_model_preset": "qwen35_9b_8bit_reasoning",
+                    },
+                )
+                self.assertEqual(job_response.status_code, 200)
+                self.assertEqual(job_response.json()["count"], 1)
+                self.assertEqual(job_response.json()["jobs"][0]["workbook_id"], workbook["workbook_id"])
+                job_id = job_response.json()["job_id"]
+                metadata = job_service.read_metadata(job_service.job_dir(job_id, project_id))
+                self.assertEqual(metadata["structured_workbook_id"], workbook["workbook_id"])
+                self.assertEqual(metadata["source_library_id"], source_id)
+                self.assertEqual(len(job_service.source_file_records(job_service.job_dir(job_id, project_id))), 2)
+        finally:
+            job_queue.enqueue = original_enqueue
+            config.PROJECTS_DIR = original_projects_dir
 
     def test_sheet_creation_loading_and_rows_are_project_scoped(self) -> None:
         from app.services import projects, structured_extraction
@@ -1066,6 +1603,33 @@ Use article wording.
         self.assertEqual(payload["fields"]["name"], "Species characteristics")
         self.assertEqual([column["column_name"] for column in payload["columns"]], ["SpeciesLatinArticle", "SpeciesCommonArticle"])
 
+    def test_workbook_import_text_exports_every_sheet_in_order_without_compiled_prompt(self) -> None:
+        from app.services import structured_extraction
+
+        text = structured_extraction.format_workbook_import_text(
+            [
+                {
+                    "name": "First sheet",
+                    "context": "First context.",
+                    "row_unit": "First preferences.",
+                    "columns": [{"column_name": "FirstField", "question": "First question?", "rules": "First rules."}],
+                },
+                {
+                    "name": "Second sheet",
+                    "context": "Second context.",
+                    "row_unit": "Second preferences.",
+                    "columns": [{"column_name": "SecondField", "question": "Second question?", "rules": "Second rules."}],
+                },
+            ]
+        )
+
+        self.assertLess(text.index("Sheet name ### First sheet"), text.index("Sheet name ### Second sheet"))
+        self.assertEqual(text.count(structured_extraction.WORKBOOK_IMPORT_TEXT_SEPARATOR.strip()), 1)
+        self.assertIn("Column name ### FirstField", text)
+        self.assertIn("Column name ### SecondField", text)
+        self.assertNotIn("Required output format", text)
+        self.assertNotIn("Return the results as tab-separated values", text)
+
     def test_sheet_import_parser_accepts_columns_only_and_validates(self) -> None:
         from app.services import structured_extraction
 
@@ -1141,6 +1705,11 @@ Rules ###
                     row_unit="One row per species.",
                     columns=[{"column_name": "SpeciesLatinArticle", "question": "State the scientific name.", "rules": ""}],
                 )
+                structured_extraction.create_sheet(
+                    project_id=str(project["project_id"]),
+                    name="Study details",
+                    columns=[{"column_name": "Country", "question": "State the country.", "rules": ""}],
+                )
                 structured_extraction.replace_job_sheet_records(
                     str(project["project_id"]),
                     str(sheet["sheet_id"]),
@@ -1164,7 +1733,7 @@ Rules ###
 
                 export_path = structured_extraction.export_structured_workbook(str(project["project_id"]))
                 workbook = load_workbook(export_path)
-                self.assertIn("Species characteristics", workbook.sheetnames)
+                self.assertEqual(workbook.sheetnames, ["Species characteristics", "Study details"])
                 worksheet = workbook["Species characteristics"]
                 headers = [worksheet.cell(row=1, column=index).value for index in range(1, 9)]
                 self.assertEqual(
@@ -1182,6 +1751,17 @@ Rules ###
                 )
                 self.assertEqual(worksheet.cell(row=2, column=1).value, "paper.pdf")
                 self.assertEqual(worksheet.cell(row=2, column=8).value, "Ailuropoda melanoleuca")
+
+                worksheet_path = structured_extraction.export_structured_worksheet(
+                    str(project["project_id"]),
+                    str(sheet["sheet_id"]),
+                )
+                selected_workbook = load_workbook(worksheet_path)
+                self.assertEqual(selected_workbook.sheetnames, ["Species characteristics"])
+                selected_worksheet = selected_workbook["Species characteristics"]
+                self.assertEqual(selected_worksheet.cell(row=2, column=1).value, "paper.pdf")
+                self.assertEqual(selected_worksheet.cell(row=2, column=8).value, "Ailuropoda melanoleuca")
+                self.assertIn("species-characteristics", worksheet_path.name)
         finally:
             config.PROJECTS_DIR = original_projects_dir
 
@@ -1427,6 +2007,7 @@ Rules ###
 
     def test_structured_pdf_page_and_api_are_project_type_scoped(self) -> None:
         from fastapi.testclient import TestClient
+        from openpyxl import load_workbook
 
         from app.main import app
         from app.services import projects, structured_extraction
@@ -1445,6 +2026,19 @@ Rules ###
                     row_unit="One row per study.",
                     columns=[{"column_name": "StudyTitle", "question": "State the title.", "rules": "Enter NA if absent."}],
                 )
+                structured_extraction.create_sheet(
+                    project_id=str(structured_project["project_id"]),
+                    name="Outcome fields",
+                    context="Outcome context.",
+                    row_unit="One row per outcome.",
+                    columns=[
+                        {
+                            "column_name": "OutcomeName",
+                            "question": "State the outcome.",
+                            "rules": "Enter NA if absent.",
+                        }
+                    ],
+                )
                 client = TestClient(app)
 
                 response = client.get(
@@ -1454,10 +2048,25 @@ Rules ###
                 self.assertEqual(response.status_code, 200)
                 self.assertIn("Workbook-style PDF extraction", response.text)
                 self.assertIn('id="duplicateWorkbookButton"', response.text)
+                self.assertIn('id="exportAllSheetTextsButton"', response.text)
+                self.assertIn('id="structuredWorksheetExportButton"', response.text)
 
                 api_response = client.get(f"/api/structured/sheets?project_id={structured_project['project_id']}")
                 self.assertEqual(api_response.status_code, 200)
-                self.assertEqual(len(api_response.json()["sheets"]), 1)
+                self.assertEqual(len(api_response.json()["sheets"]), 2)
+
+                workbooks_response = client.get(f"/api/structured/workbooks?project_id={structured_project['project_id']}")
+                self.assertEqual(workbooks_response.status_code, 200)
+                self.assertEqual([item["name"] for item in workbooks_response.json()["workbooks"]], ["Workbook 1"])
+                default_workbook_id = workbooks_response.json()["workbooks"][0]["workbook_id"]
+                scoped_sheets_response = client.get(
+                    f"/api/structured/sheets?project_id={structured_project['project_id']}&workbook_id={default_workbook_id}"
+                )
+                self.assertEqual(scoped_sheets_response.status_code, 200)
+                self.assertEqual(len(scoped_sheets_response.json()["sheets"]), 2)
+                sources_response = client.get(f"/api/structured/sources?project_id={structured_project['project_id']}")
+                self.assertEqual(sources_response.status_code, 200)
+                self.assertEqual(sources_response.json()["sources"], [])
 
                 text_response = client.get(
                     f"/api/structured/sheets/{sheet['sheet_id']}/import-text?project_id={structured_project['project_id']}"
@@ -1465,6 +2074,41 @@ Rules ###
                 self.assertEqual(text_response.status_code, 200)
                 self.assertIn("Sheet name ### Study fields", text_response.text)
                 self.assertIn("Column name ### StudyTitle", text_response.text)
+
+                workbook_text_response = client.get(
+                    f"/api/structured/workbook/import-text?project_id={structured_project['project_id']}"
+                )
+                self.assertEqual(workbook_text_response.status_code, 200)
+                self.assertIn("attachment;", workbook_text_response.headers["content-disposition"])
+                self.assertIn(
+                    "structured-project_workbook-1_structured_sheet_prompts.txt",
+                    workbook_text_response.headers["content-disposition"],
+                )
+                self.assertIn("Sheet name ### Study fields", workbook_text_response.text)
+                self.assertIn("Sheet name ### Outcome fields", workbook_text_response.text)
+                self.assertLess(
+                    workbook_text_response.text.index("Sheet name ### Study fields"),
+                    workbook_text_response.text.index("Sheet name ### Outcome fields"),
+                )
+                self.assertNotIn("Required output format", workbook_text_response.text)
+
+                wrong_type_text_response = client.get(
+                    f"/api/structured/workbook/import-text?project_id={pdf_project['project_id']}"
+                )
+                self.assertEqual(wrong_type_text_response.status_code, 400)
+
+                worksheet_response = client.get(
+                    f"/api/structured/sheets/{sheet['sheet_id']}/export?project_id={structured_project['project_id']}"
+                )
+                self.assertEqual(worksheet_response.status_code, 200)
+                self.assertIn("study-fields", worksheet_response.headers["content-disposition"])
+                exported_worksheet = load_workbook(BytesIO(worksheet_response.content))
+                self.assertEqual(exported_worksheet.sheetnames, ["Study fields"])
+
+                wrong_type_worksheet_response = client.get(
+                    f"/api/structured/sheets/{sheet['sheet_id']}/export?project_id={pdf_project['project_id']}"
+                )
+                self.assertEqual(wrong_type_worksheet_response.status_code, 400)
 
                 duplicate_response = client.post(
                     "/api/structured/workbook/duplicate",

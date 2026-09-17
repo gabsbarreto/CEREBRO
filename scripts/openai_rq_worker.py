@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Any
 
 from _bootstrap import ensure_project_root
 
@@ -23,8 +24,8 @@ def main() -> int:
     parser.add_argument("--reasoning-effort", default="medium")
     parser.add_argument("--response-json-file", default="")
     parser.add_argument("--request-json-file", default="")
-    parser.add_argument("--input-file-id", default="")
-    parser.add_argument("--input-file-path", default="")
+    parser.add_argument("--input-file-id", action="append", default=[])
+    parser.add_argument("--input-file-path", action="append", default=[])
     args = parser.parse_args()
 
     from openai import OpenAI
@@ -37,18 +38,44 @@ def main() -> int:
     emit({"event": "rq_model_loading", "model": args.model, "provider": "openai"})
     client = OpenAI()
     emit({"event": "rq_model_loaded", "provider": "openai"})
-    input_file_id = str(args.input_file_id or "").strip()
-    uploaded_file_id = ""
-    if not input_file_id and str(args.input_file_path or "").strip():
-        input_path = Path(args.input_file_path)
-        emit({"event": "openai_file_upload_started", "provider": "openai", "path": str(input_path)})
-        with input_path.open("rb") as handle:
-            uploaded = client.files.create(file=handle, purpose="user_data")
-        input_file_id = str(uploaded.id)
-        uploaded_file_id = input_file_id
-        emit({"event": "openai_file_uploaded", "provider": "openai", "file_id": input_file_id})
-    elif input_file_id:
-        emit({"event": "openai_file_reused", "provider": "openai", "file_id": input_file_id})
+    input_file_ids = [str(value or "").strip() for value in args.input_file_id if str(value or "").strip()]
+    input_file_paths = [Path(value) for value in args.input_file_path if str(value or "").strip()]
+    uploaded_file_ids: list[str] = []
+    if not input_file_ids:
+        for source_index, input_path in enumerate(input_file_paths):
+            emit(
+                {
+                    "event": "openai_file_upload_started",
+                    "provider": "openai",
+                    "path": str(input_path),
+                    "source_index": source_index,
+                    "source_name": input_path.name,
+                }
+            )
+            with input_path.open("rb") as handle:
+                uploaded = client.files.create(file=handle, purpose="user_data")
+            file_id = str(uploaded.id)
+            input_file_ids.append(file_id)
+            uploaded_file_ids.append(file_id)
+            emit(
+                {
+                    "event": "openai_file_uploaded",
+                    "provider": "openai",
+                    "file_id": file_id,
+                    "source_index": source_index,
+                    "source_name": input_path.name,
+                }
+            )
+    else:
+        for source_index, file_id in enumerate(input_file_ids):
+            emit(
+                {
+                    "event": "openai_file_reused",
+                    "provider": "openai",
+                    "file_id": file_id,
+                    "source_index": source_index,
+                }
+            )
     emit(
         {
             "event": "rq_generation_started",
@@ -57,11 +84,11 @@ def main() -> int:
             "max_output_tokens": int(args.max_output_tokens),
             "enable_reasoning": enable_reasoning,
             "reasoning_effort": effort if enable_reasoning else None,
-            "input_file": bool(input_file_id),
+            "input_file_count": len(input_file_ids),
         }
     )
     user_content: list[dict[str, str]] = []
-    if input_file_id:
+    for input_file_id in input_file_ids:
         user_content.append(
             {
                 "type": "input_file",
@@ -110,8 +137,8 @@ def main() -> int:
             "max_output_tokens": int(args.max_output_tokens),
             "enable_reasoning": enable_reasoning,
             "reasoning_effort": effort if enable_reasoning else None,
-            "input_file_id": input_file_id,
-            "input_file_uploaded": bool(uploaded_file_id),
+            "input_file_ids": input_file_ids,
+            "input_file_uploaded": bool(uploaded_file_ids),
         },
     )
     output = response_text(response)

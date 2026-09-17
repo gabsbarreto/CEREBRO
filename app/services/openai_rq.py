@@ -24,6 +24,8 @@ def run_openai_rq(
     api_key: str = "",
     input_file_id: str = "",
     input_file_path: Path | None = None,
+    input_file_ids: list[str] | None = None,
+    input_file_paths: list[Path] | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
     cmd = [
@@ -44,10 +46,18 @@ def run_openai_rq(
         "--reasoning-effort",
         reasoning_effort,
     ]
-    if input_file_id.strip():
-        cmd.extend(["--input-file-id", input_file_id.strip()])
-    elif input_file_path is not None:
-        cmd.extend(["--input-file-path", str(input_file_path)])
+    resolved_file_ids = [str(value).strip() for value in input_file_ids or [] if str(value).strip()]
+    resolved_file_paths = [Path(value) for value in input_file_paths or []]
+    if not resolved_file_ids and input_file_id.strip():
+        resolved_file_ids = [input_file_id.strip()]
+    if not resolved_file_ids and not resolved_file_paths and input_file_path is not None:
+        resolved_file_paths = [input_file_path]
+    if resolved_file_ids:
+        for file_id in resolved_file_ids:
+            cmd.extend(["--input-file-id", file_id])
+    elif resolved_file_paths:
+        for file_path in resolved_file_paths:
+            cmd.extend(["--input-file-path", str(file_path)])
     env = os.environ.copy()
     resolved_api_key = resolve_openai_api_key(api_key, env)
     if resolved_api_key:
