@@ -21,6 +21,8 @@ GPT54_NANO_MAX_OUTPUT_TOKENS = 128_000
 GPT56_MAX_OUTPUT_TOKENS = 128_000
 GPT56_MODEL_TIERS = ("sol", "terra", "luna")
 GPT56_REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
+GPT6_LUNA_MAX_OUTPUT_TOKENS = 128_000
+GPT6_LUNA_REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 
 
 def gpt56_model_presets() -> dict[str, dict[str, Any]]:
@@ -39,6 +41,24 @@ def gpt56_model_presets() -> dict[str, dict[str, Any]]:
                 "rq_enable_thinking": True,
                 "openai_reasoning_effort": effort,
             }
+    return presets
+
+
+def gpt6_luna_model_presets() -> dict[str, dict[str, Any]]:
+    """Return the supported GPT-6 Luna reasoning presets exposed in the UI."""
+
+    presets: dict[str, dict[str, Any]] = {}
+    for effort in GPT6_LUNA_REASONING_EFFORTS:
+        preset_id = f"openai_gpt6_luna_{effort}"
+        reasoning_label = "no reasoning" if effort == "none" else f"{effort} reasoning"
+        presets[preset_id] = {
+            "label": f"OpenAI GPT-6 Luna ({reasoning_label})",
+            "rq_provider": "openai",
+            "rq_screening_model": "gpt-6-luna",
+            "rq_max_tokens": min(config.OPENAI_RQ_SCREENING_MAX_TOKENS, GPT6_LUNA_MAX_OUTPUT_TOKENS),
+            "rq_enable_thinking": True,
+            "openai_reasoning_effort": effort,
+        }
     return presets
 
 
@@ -81,6 +101,7 @@ MODEL_PRESETS: dict[str, dict[str, Any]] = {
         "openai_reasoning_effort": "xhigh",
     },
     **gpt56_model_presets(),
+    **gpt6_luna_model_presets(),
 }
 
 

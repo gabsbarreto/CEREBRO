@@ -246,6 +246,7 @@ Model presets currently include:
 - `openai_gpt54_mini_xhigh`: public OpenAI GPT-5.4 mini preset with xhigh reasoning.
 - `openai_gpt54_nano_xhigh`: public OpenAI GPT-5.4 nano preset with xhigh reasoning and a 128,000-token model limit.
 - GPT-5.6 Sol, Terra, and Luna are exposed with all supported reasoning efforts: `none`, `low`, `medium`, `high`, `xhigh`, and `max`. Preset IDs use `openai_gpt56_<tier>_<effort>`.
+- GPT-6 Luna is exposed with `none`, `low`, `medium`, `high`, `xhigh`, and `max` reasoning efforts. Preset IDs use `openai_gpt6_luna_<effort>`.
 
 Provider normalization:
 
@@ -1331,6 +1332,7 @@ These are useful checks for future LLMs before editing:
 - `openai_gpt54_mini_high` and `openai_gpt54_mini_xhigh` are public presets for `gpt-5.4-mini` with `high` and `xhigh` reasoning, respectively.
 - `openai_gpt54_nano_xhigh` is a public preset for `gpt-5.4-nano` with `xhigh` reasoning and caps output at the model's 128,000-token limit.
 - GPT-5.6 presets cover `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` at `none`, `low`, `medium`, `high`, `xhigh`, and `max`; all cap output at 128,000 tokens.
+- GPT-6 Luna presets cover `gpt-6-luna` at `none`, `low`, `medium`, `high`, `xhigh`, and `max`; all cap output at 128,000 tokens.
 - Prompt files are shared globally across projects, not stored per project.
 - Runtime Excel summaries can be rebuilt from active jobs.
 - Structured PDF parse failures still mark the underlying model job complete; the parse status is carried separately in metadata and sheet error records.

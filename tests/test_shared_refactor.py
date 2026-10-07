@@ -166,6 +166,26 @@ class SharedHelperTests(unittest.TestCase):
                     self.assertEqual(public_presets[preset_id]["settings"]["max_tokens"], 128_000)
                     self.assertEqual(public_presets[preset_id]["settings"]["openai_reasoning_effort"], effort)
 
+    def test_all_gpt6_luna_reasoning_presets_are_public(self) -> None:
+        reasoning_efforts = ("none", "low", "medium", "high", "xhigh", "max")
+        public_presets = {preset["id"]: preset for preset in public_model_presets()}
+
+        for effort in reasoning_efforts:
+            preset_id = f"openai_gpt6_luna_{effort}"
+            settings = JobSettings.from_form({"rq_model_preset": preset_id})
+            with self.subTest(preset_id=preset_id):
+                self.assertEqual(settings.rq_provider, "openai")
+                self.assertEqual(settings.rq_screening_model, "gpt-6-luna")
+                self.assertEqual(settings.rq_model_preset, preset_id)
+                self.assertTrue(settings.rq_enable_thinking)
+                self.assertEqual(settings.openai_reasoning_effort, effort)
+                self.assertEqual(settings.rq_max_tokens, 128_000)
+
+                self.assertIn(preset_id, public_presets)
+                self.assertEqual(public_presets[preset_id]["settings"]["model"], "gpt-6-luna")
+                self.assertEqual(public_presets[preset_id]["settings"]["max_tokens"], 128_000)
+                self.assertEqual(public_presets[preset_id]["settings"]["openai_reasoning_effort"], effort)
+
     def test_gpt54_mini_superseded_preset_family_resolves_to_xhigh(self) -> None:
         settings = JobSettings.from_form({"rq_model_preset": "openai_gpt54_mini_previous"})
         self.assertEqual(settings.rq_provider, "openai")
