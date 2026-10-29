@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>About | CEREBRO</title>
     <link rel="stylesheet" href="/static/styles.css?v=20261029-home" />
-    <link rel="stylesheet" href="/static/home.css?v=20261029-home" />
+    <link rel="stylesheet" href="/static/home.css?v=20261029-about-details" />
   </head>
   <body class="home-page">
     {% include "_project_nav.html" %}
@@ -15,10 +15,51 @@
       <h1>CEREBRO</h1>
       <p class="about-lead">A workspace for extracting research data from articles and spreadsheets.</p>
       <div class="about-sections">
-        <section><h2>PDF extraction</h2><p>Apply a prompt to full-text PDFs using local OCR or direct OpenAI PDF input. Review each job and export its results.</p></section>
-        <section><h2>Structured PDF extraction</h2><p>Define worksheets with questions and rules, extract tabular results from studies, and export the workbook to Excel.</p></section>
-        <section><h2>Text extraction</h2><p>Map columns from CSV or Excel files into prompts, run extraction for each record, and export results alongside the original data.</p></section>
-        <section><h2>Projects</h2><p>Keep source files, jobs, and results organized in separate project workspaces.</p></section>
+        <details class="about-option">
+          <summary>
+            <span class="about-option-heading"><span>PDF extraction</span><span class="about-option-toggle" aria-hidden="true"></span></span>
+            <span class="about-option-summary">Apply a prompt to full-text PDFs and review each result.</span>
+          </summary>
+          <div class="about-option-content">
+            <p>Use a flexible prompt to produce free-text or Markdown answers from full-text articles. This is useful when the information varies between papers or needs explanation rather than fixed fields.</p>
+            <p><strong>Example:</strong> Summarize how each study describes its intervention, results, and limitations, including details found in different sections of the article.</p>
+            <p>Process PDFs using local OCR with a local or OpenAI model, or send them directly to OpenAI. You can also attach supplementary files, monitor jobs, and export results to Excel.</p>
+          </div>
+        </details>
+        <details class="about-option">
+          <summary>
+            <span class="about-option-heading"><span>Structured PDF extraction</span><span class="about-option-toggle" aria-hidden="true"></span></span>
+            <span class="about-option-summary">Extract PDF data into workbook-style sheets.</span>
+          </summary>
+          <div class="about-option-content">
+            <p>Design the spreadsheet structure first: define ordered columns with questions and rules, then extract consistent rows from each article. Multiple worksheets can represent related types of information, supporting database-like organization and comparisons across studies.</p>
+            <p><strong>Example:</strong> For a review of treatments, create separate worksheets for study characteristics, participant populations, interventions, and outcomes. A study might have one study-level row, several population or intervention rows, and multiple outcome rows, each linked back to its source article.</p>
+            <p>The Excel-like display lets you define columns and review extracted rows in a familiar grid. You can scan results alongside their source PDFs and parse statuses before exporting.</p>
+            <p>Reuse source files across workbooks, review parsed rows and errors, and export a worksheet or full workbook to Excel. The sheets provide a tabular structure; CEREBRO does not automatically create database relationships between them.</p>
+          </div>
+        </details>
+        <details class="about-option">
+          <summary>
+            <span class="about-option-heading"><span>Text extraction</span><span class="about-option-toggle" aria-hidden="true"></span></span>
+            <span class="about-option-summary">Extract information from CSV or Excel records.</span>
+          </summary>
+          <div class="about-option-content">
+            <p>Use existing text in a CSV or Excel file, such as titles, abstracts, notes, or screening records. Choose which columns to include in the prompt, and CEREBRO processes each row as an individual job.</p>
+            <p><strong>Example:</strong> Screen a spreadsheet of article titles and abstracts against review criteria, or categorize comments and notes collected in a study.</p>
+            <p>The workbook-style display shows selected input columns alongside job statuses and result previews, making it easier to review and find records while processing continues.</p>
+            <p>This works well for large record sets and preserves the original columns alongside the extracted results. Use separate sheets to compare prompts or models and retry failed rows.</p>
+          </div>
+        </details>
+        <details class="about-option">
+          <summary>
+            <span class="about-option-heading"><span>Projects</span><span class="about-option-toggle" aria-hidden="true"></span></span>
+            <span class="about-option-summary">Organize files, jobs, and results in separate workspaces.</span>
+          </summary>
+          <div class="about-option-content">
+            <p>Choose an extraction type when creating a project, then return to that project's matching dashboard from the Projects page.</p>
+            <p>Sort projects by name or date, archive and restore them, or delete a project and its stored data when it is no longer needed.</p>
+          </div>
+        </details>
       </div>
       <a class="home-primary-link" href="/projects">Open projects <span aria-hidden="true">&rarr;</span></a>
     </main>

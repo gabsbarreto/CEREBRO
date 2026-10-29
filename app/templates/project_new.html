@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>New Project | CEREBRO</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20261028-project-page" />
+    <link rel="stylesheet" href="/static/styles.css?v=20261029-project-cancel-red" />
   </head>
   <body>
     <div class="neural-backdrop" aria-hidden="true"></div>
@@ -17,7 +17,6 @@
             <h1>New project</h1>
             <p class="tagline">Create a separate workspace for a review, extraction run, or paper set.</p>
           </div>
-          <a class="button" href="/projects">Back to projects</a>
         </div>
         <form id="projectCreateForm" class="project-create-form" method="post" action="/projects/new">
           <label class="field">
@@ -56,7 +55,10 @@
           <p id="projectFormError" class="form-error {% if not form_error %}hidden{% endif %}" role="alert">{{ form_error }}</p>
           <div class="form-footer">
             <div class="queue-hint">Jobs created after this will be stored inside the new project.</div>
-            <button type="submit">Create project</button>
+            <div class="project-create-actions">
+              <a class="button project-cancel-button" href="/projects">Cancel</a>
+              <button type="submit">Create project</button>
+            </div>
           </div>
         </form>
       </section>
