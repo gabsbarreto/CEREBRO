@@ -2244,7 +2244,8 @@ class BackendSmokeTests(unittest.TestCase):
 
                 client = TestClient(app)
                 expectations = {
-                    "/": 307,
+                    "/": 200,
+                    "/about": 200,
                     "/rq-screening": 200,
                     "/api/jobs": 200,
                     "/api/queue": 200,

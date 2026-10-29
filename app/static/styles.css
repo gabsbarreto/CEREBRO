@@ -404,6 +404,7 @@ body { padding-top: 64px; }
   text-decoration: none;
 }
 .project-topnav-link { padding: 10px; color: var(--cyan); }
+.main-nav-links { display: flex; gap: 10px; }
 .project-topnav-brand .brand-mark { width: 38px; height: 38px; }
 .project-topnav-brand .brand-mark::before { width: 25px; height: 25px; }
 .project-topnav-brand .brand-mark::after { width: 12px; height: 12px; }

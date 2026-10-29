@@ -17,7 +17,13 @@ def test_project_lifecycle_and_dashboard_visits(tmp_path, monkeypatch):
     assert page.status_code == 200
     assert "Project A" in page.text
     assert "Not yet opened" in page.text
-    assert client.get("/", follow_redirects=False).headers["location"] == "/projects"
+    home = client.get("/")
+    assert home.status_code == 200
+    assert 'href="/about"' in home.text
+    assert 'href="/projects"' in home.text
+    assert 'type="button" disabled>Sign in' in home.text
+    assert client.get("/about").status_code == 200
+    assert client.get(f"/?project_id={project_id}", follow_redirects=False).headers["location"] == project["dashboard_path"]
 
     dashboard = client.get(project["dashboard_path"])
     assert dashboard.status_code == 200

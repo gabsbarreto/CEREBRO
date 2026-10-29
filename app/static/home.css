@@ -1,0 +1,53 @@
+.home-page { background: #09111b; }
+.home-surface {
+  position: relative;
+  min-height: calc(100svh - 64px);
+  background: #101c28 url('/static/research-workspace.png') center / cover no-repeat;
+  isolation: isolate;
+}
+.home-surface::before { content: ""; position: absolute; inset: 0; z-index: -1; background: rgb(5 14 22 / 0.78); }
+.home-hero {
+  min-height: min(410px, calc(100svh - 230px));
+  display: flex;
+  align-items: center;
+}
+.home-hero-content { width: min(1180px, 100%); margin: 0 auto; padding: 56px 28px 38px; }
+.home-brand { display: flex; align-items: center; gap: 24px; }
+.home-brand h1 { font-size: 68px; letter-spacing: 0; overflow-wrap: anywhere; }
+.home-brand .home-brand-mark { width: 88px; height: 88px; }
+.home-intro { max-width: 540px; margin: 26px 0 28px; color: #e0e9ee; font-size: 21px; line-height: 1.55; }
+.home-primary-link { display: inline-flex; align-items: center; gap: 20px; padding: 13px 17px; border: 1px solid #50d6c0; border-radius: 4px; background: #5de0c9; color: #072722; font-weight: 750; text-decoration: none; }
+.home-primary-link:hover { background: #a2f4e2; }
+.home-primary-link span { font-size: 20px; }
+.home-destinations { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; width: min(1180px, 100%); margin: 0 auto; padding: 0 28px; }
+.home-destination { min-height: 175px; display: flex; flex-direction: column; gap: 12px; padding: 22px; border: 1px solid rgb(163 198 200 / 0.34); border-radius: 4px; background: rgb(8 24 31 / 0.48); color: #edf5f5; text-decoration: none; }
+a.home-destination:hover { background: rgb(16 46 51 / 0.7); border-color: #64d8c2; }
+.home-destination-index { color: #64d8c2; font-size: 11px; font-weight: 750; }
+.home-destination-title { display: flex; justify-content: space-between; gap: 12px; font-size: 21px; font-weight: 750; }
+.home-destination-description { max-width: 440px; color: #a7b9c2; line-height: 1.5; }
+.home-destination button { align-self: flex-start; margin-top: 2px; padding: 7px 12px; font-size: 13px; }
+.home-project-action { width: min(1180px, 100%); margin: 0 auto; padding: 24px 28px 48px; }
+.about-page { width: min(920px, 100%); margin: 0 auto; padding: 58px 28px 80px; }
+.about-back { display: inline-block; margin-bottom: 48px; color: #a6c5cc; text-decoration: none; }
+.about-back:hover { color: #64d8c2; }
+.about-page h1 { font-size: 52px; letter-spacing: 0; }
+.about-lead { max-width: 620px; color: #c3d0d7; font-size: 20px; line-height: 1.5; }
+.about-sections { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 32px 48px; margin: 48px 0; }
+.about-sections section { padding-top: 20px; border-top: 1px solid #34505a; }
+.about-sections h2 { font-size: 18px; }
+.about-sections p { color: #a7b9c2; line-height: 1.6; }
+@media (max-width: 760px) {
+  .home-surface { background-position: 63% center; }
+  .home-hero { min-height: 0; }
+  .home-hero-content { padding: 48px 20px 24px; }
+  .home-brand { gap: 14px; }
+  .home-brand h1 { font-size: 36px; }
+  .home-brand .home-brand-mark { width: 58px; height: 58px; }
+  .home-intro { font-size: 18px; }
+  .home-destinations, .about-sections { grid-template-columns: 1fr; }
+  .home-destinations { padding: 0 20px; }
+  .home-destination { min-height: 145px; padding: 22px 20px; }
+  .home-project-action { padding: 24px 20px 40px; }
+  .about-page { padding: 40px 20px 64px; }
+  .about-page h1 { font-size: 40px; }
+}

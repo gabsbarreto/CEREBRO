@@ -68,11 +68,16 @@ async def stop_local_inference_worker() -> None:
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index(project_id: str = "") -> RedirectResponse:
-    if not project_id:
-        return RedirectResponse(url="/projects")
-    project = selected_project_or_default(project_id)
-    return RedirectResponse(url=projects.project_dashboard_path(project))
+async def index(request: Request, project_id: str = "") -> HTMLResponse:
+    if project_id:
+        project = selected_project_or_default(project_id)
+        return RedirectResponse(url=projects.project_dashboard_path(project))  # type: ignore[return-value]
+    return templates.TemplateResponse(request, "home.html", context={"request": request})
+
+
+@app.get("/about", response_class=HTMLResponse)
+async def about(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request, "about.html", context={"request": request})
 
 
 @app.get("/rq-screening", response_class=HTMLResponse)

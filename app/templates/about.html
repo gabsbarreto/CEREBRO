@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>About | CEREBRO</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20261029-home" />
+    <link rel="stylesheet" href="/static/home.css?v=20261029-home" />
+  </head>
+  <body class="home-page">
+    {% include "_project_nav.html" %}
+    <main class="about-page">
+      <a class="about-back" href="/">&larr; Home</a>
+      <p class="eyebrow">ABOUT CEREBRO</p>
+      <h1>CEREBRO</h1>
+      <p class="about-lead">A workspace for extracting research data from articles and spreadsheets.</p>
+      <div class="about-sections">
+        <section><h2>PDF extraction</h2><p>Apply a prompt to full-text PDFs using local OCR or direct OpenAI PDF input. Review each job and export its results.</p></section>
+        <section><h2>Structured PDF extraction</h2><p>Define worksheets with questions and rules, extract tabular results from studies, and export the workbook to Excel.</p></section>
+        <section><h2>Text extraction</h2><p>Map columns from CSV or Excel files into prompts, run extraction for each record, and export results alongside the original data.</p></section>
+        <section><h2>Projects</h2><p>Keep source files, jobs, and results organized in separate project workspaces.</p></section>
+      </div>
+      <a class="home-primary-link" href="/projects">Open projects <span aria-hidden="true">&rarr;</span></a>
+    </main>
+  </body>
+</html>
