@@ -69,6 +69,8 @@ async def stop_local_inference_worker() -> None:
 
 @app.get("/", response_class=HTMLResponse)
 async def index(project_id: str = "") -> RedirectResponse:
+    if not project_id:
+        return RedirectResponse(url="/projects")
     project = selected_project_or_default(project_id)
     return RedirectResponse(url=projects.project_dashboard_path(project))
 
@@ -78,6 +80,7 @@ async def rq_screening(request: Request, project_id: str = "") -> HTMLResponse:
     current_project = selected_project_or_default(project_id)
     if projects.normalize_extraction_type(current_project.get("extraction_type")) != "pdf":
         return RedirectResponse(url=projects.project_dashboard_path(current_project))  # type: ignore[return-value]
+    current_project = projects.record_project_visit(str(current_project["project_id"]))
     return templates.TemplateResponse(
         request,
         "rq_screening.html",
@@ -101,6 +104,7 @@ async def text_extraction_screen(request: Request, project_id: str = "") -> HTML
     current_project = selected_project_or_default(project_id)
     if projects.normalize_extraction_type(current_project.get("extraction_type")) != "text":
         return RedirectResponse(url=projects.project_dashboard_path(current_project))  # type: ignore[return-value]
+    current_project = projects.record_project_visit(str(current_project["project_id"]))
     return templates.TemplateResponse(
         request,
         "text_extraction.html",
@@ -121,6 +125,7 @@ async def structured_pdf_screen(request: Request, project_id: str = "") -> HTMLR
     current_project = selected_project_or_default(project_id)
     if projects.normalize_extraction_type(current_project.get("extraction_type")) != "pdf_structured":
         return RedirectResponse(url=projects.project_dashboard_path(current_project))  # type: ignore[return-value]
+    current_project = projects.record_project_visit(str(current_project["project_id"]))
     return templates.TemplateResponse(
         request,
         "structured_pdf.html",
@@ -137,6 +142,39 @@ async def structured_pdf_screen(request: Request, project_id: str = "") -> HTMLR
             "model_presets": public_model_presets(),
         },
     )
+
+
+@app.get("/projects", response_class=HTMLResponse)
+async def project_list_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request, "projects.html", context={"request": request, "projects": projects.list_projects()})
+
+
+@app.post("/api/projects/{project_id}/archive")
+async def archive_project(project_id: str, archived: bool = Form(True)) -> JSONResponse:
+    try:
+        project = projects.set_project_archived(project_id, archived)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse({"project": project})
+
+
+@app.delete("/api/projects/{project_id}")
+async def delete_project(project_id: str) -> JSONResponse:
+    try:
+        projects.get_project(project_id)
+        restore_thread = getattr(app.state, "queue_restore_thread", None)
+        if restore_thread is not None and restore_thread.is_alive():
+            raise HTTPException(status_code=409, detail="Wait for queue restoration to finish before deleting a project.")
+        if job_queue.active_job_ids(project_id=project_id) or text_extraction.text_job_queue.active_job_ids(project_id=project_id):
+            raise HTTPException(status_code=409, detail="This project has queued or running jobs. Finish or remove them before deleting it.")
+        projects.delete_project(project_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return JSONResponse({"deleted": True, "project_id": project_id})
 
 
 @app.get("/projects/new", response_class=HTMLResponse)

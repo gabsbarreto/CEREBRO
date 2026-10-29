@@ -4,10 +4,11 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>New Project | CEREBRO</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260604-text" />
+    <link rel="stylesheet" href="/static/styles.css?v=20261028-project-page" />
   </head>
   <body>
     <div class="neural-backdrop" aria-hidden="true"></div>
+    {% include "_project_nav.html" %}
     <main class="shell project-create-shell">
       <section class="panel project-create-panel">
         <div class="section-head">
@@ -16,7 +17,7 @@
             <h1>New project</h1>
             <p class="tagline">Create a separate workspace for a review, extraction run, or paper set.</p>
           </div>
-          <a class="button" href="/">Back to CEREBRO</a>
+          <a class="button" href="/projects">Back to projects</a>
         </div>
         <form id="projectCreateForm" class="project-create-form" method="post" action="/projects/new">
           <label class="field">

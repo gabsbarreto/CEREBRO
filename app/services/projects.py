@@ -166,7 +166,7 @@ def validate_project_id(project_id: str) -> str:
     safe_id = str(project_id or "").strip()
     if not safe_id:
         raise ValueError("Project id is required.")
-    if not _SAFE_PROJECT_ID_RE.fullmatch(safe_id):
+    if safe_id in {".", ".."} or not _SAFE_PROJECT_ID_RE.fullmatch(safe_id):
         raise ValueError("Project id contains invalid characters.")
     return safe_id
 
@@ -215,8 +215,35 @@ def read_project_file(path: Path) -> dict[str, Any]:
     payload["dashboard_path"] = project_dashboard_path(payload)
     payload.setdefault("created_at", "")
     payload.setdefault("updated_at", "")
+    payload.setdefault("last_seen_at", "")
+    payload.setdefault("archived", False)
     payload.setdefault("is_default", payload["project_id"] == DEFAULT_PROJECT_ID)
     return payload
+
+
+def record_project_visit(project_id: str) -> dict[str, Any]:
+    project = get_project(project_id)
+    project["last_seen_at"] = utc_now()
+    write_project_file(project_root(project_id) / "project.json", project)
+    return project
+
+
+def set_project_archived(project_id: str, archived: bool) -> dict[str, Any]:
+    project = get_project(project_id)
+    project["archived"] = archived
+    project["updated_at"] = utc_now()
+    write_project_file(project_root(project_id) / "project.json", project)
+    return project
+
+
+def delete_project(project_id: str) -> None:
+    project = get_project(project_id)
+    if project.get("is_default") or project_id == DEFAULT_PROJECT_ID:
+        raise ValueError("The Legacy jobs project cannot be deleted because it is used for legacy migration. You can archive it instead.")
+    root = project_root(project_id)
+    if root.is_symlink():
+        raise ValueError("A project stored as a symbolic link cannot be deleted here.")
+    shutil.rmtree(root)
 
 
 def write_project_file(path: Path, payload: dict[str, Any]) -> None:

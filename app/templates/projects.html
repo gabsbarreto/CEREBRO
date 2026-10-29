@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Projects | CEREBRO</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20261028-project-sort" />
+  </head>
+  <body>
+    <div class="neural-backdrop" aria-hidden="true"></div>
+    {% include "_project_nav.html" %}
+    <main class="shell projects-page">
+      <div class="projects-heading">
+        <div><p class="eyebrow">CEREBRO</p><h1>Projects</h1></div>
+        <a class="button" href="/projects/new">+ New project</a>
+      </div>
+      <section class="projects-list" aria-label="Projects">
+        <div class="projects-toolbar">
+          <div class="project-tabs" role="tablist" aria-label="Project status">
+            <button type="button" role="tab" id="activeProjectsTab" aria-selected="true">Active <span id="activeCount"></span></button>
+            <button type="button" role="tab" id="archivedProjectsTab" aria-selected="false">Archived <span id="archivedCount"></span></button>
+          </div>
+          <div class="projects-actions">
+            <button id="archiveProjectButton" type="button" class="secondary-button" disabled>Archive</button>
+            <button id="deleteProjectButton" type="button" class="secondary-button project-delete-button" disabled>Delete</button>
+          </div>
+        </div>
+        <p id="projectActionStatus" class="project-action-status" role="status" aria-live="polite"></p>
+        <div class="projects-table-wrap">
+          <table class="projects-table">
+            <thead><tr>
+              <th scope="col"><span class="visually-hidden">Select project</span></th>
+              <th scope="col" aria-sort="ascending"><button class="project-sort" type="button" data-sort="name">Project <span class="project-sort-indicator" aria-hidden="true">&#9650;</span></button></th>
+              <th scope="col"><button class="project-sort" type="button" data-sort="created">Created <span class="project-sort-indicator" aria-hidden="true"></span></button></th>
+              <th scope="col"><button class="project-sort" type="button" data-sort="lastSeen">Last opened <span class="project-sort-indicator" aria-hidden="true"></span></button></th>
+            </tr></thead>
+            <tbody id="projectsTableBody">
+              {% for project in projects %}
+              <tr data-project-id="{{ project.project_id }}" data-archived="{{ 'true' if project.archived else 'false' }}">
+                <td><input type="radio" name="selected_project" value="{{ project.project_id }}" aria-label="Select {{ project.name }}" /></td>
+                <td><a class="project-name-link" href="{{ project.dashboard_path }}">{{ project.name }}</a><span class="project-type-label">{{ project.extraction_type_label }}</span></td>
+                <td><time data-date="{{ project.created_at }}">{{ project.created_at or 'Unknown' }}</time></td>
+                <td><time data-date="{{ project.last_seen_at }}">{{ project.last_seen_at or 'Not yet opened' }}</time></td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          <p id="projectsEmpty" class="projects-empty" hidden>No projects in this view.</p>
+        </div>
+      </section>
+    </main>
+    <script src="/static/projects.js?v=20261028-sort"></script>
+  </body>
+</html>

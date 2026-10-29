@@ -4,59 +4,18 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Structured PDF Extraction | CEREBRO</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260916-structured-workbooks-run-settings" />
+    <link rel="stylesheet" href="/static/styles.css?v=20261028-project-page" />
   </head>
   <body data-current-project-id="{{ current_project.project_id }}" data-current-project-name="{{ current_project.name }}" data-current-project-type="{{ current_project.extraction_type }}">
     <div class="neural-backdrop" aria-hidden="true"></div>
-    <aside id="projectSidebar" class="project-sidebar collapsed" aria-label="Project navigation">
-      <button id="sidebarToggle" class="sidebar-toggle" type="button" aria-label="Toggle project sidebar" aria-expanded="false">
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M4 7h16M4 12h16M4 17h16"></path>
-        </svg>
-      </button>
-      <div class="sidebar-content">
-        <a class="sidebar-brand" href="/?project_id={{ current_project.project_id }}">
-          <span class="sidebar-mark" aria-hidden="true"></span>
-          <span>CEREBRO</span>
-        </a>
-        <nav class="sidebar-nav" aria-label="Projects">
-          <div id="projectsNavItem" class="sidebar-nav-item">
-            <button id="projectsMenuButton" type="button" aria-expanded="false">
-              <span>Projects</span>
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M9 6l6 6-6 6"></path>
-              </svg>
-            </button>
-            <div id="projectsFlyout" class="projects-flyout" role="menu">
-              {% for project in projects %}
-              <button
-                type="button"
-                class="project-choice {% if project.project_id == current_project.project_id %}active{% endif %}"
-                data-project-id="{{ project.project_id }}"
-                data-extraction-type="{{ project.extraction_type }}"
-                data-dashboard-path="{{ project.dashboard_path }}"
-                role="menuitem"
-              >
-                <strong>{{ project.name }}</strong>
-                <small>{{ project.extraction_type_label }}</small>
-              </button>
-              {% endfor %}
-            </div>
-          </div>
-          <a class="sidebar-link" href="/projects/new">New project</a>
-        </nav>
-      </div>
-    </aside>
+    {% include "_project_nav.html" %}
 
     <main class="shell structured-shell">
       <header class="topbar hero-panel">
         <div class="brand-lockup">
-          <div class="brand-mark" aria-hidden="true">
-            <span></span>
-          </div>
           <div>
             <p class="eyebrow">Workbook-style PDF extraction</p>
-            <h1>CEREBRO</h1>
+            <h1>Structured PDF extraction</h1>
             <p class="tagline">Extract article PDFs into structured sheets.</p>
           </div>
         </div>
